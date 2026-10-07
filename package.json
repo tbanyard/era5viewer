@@ -1,0 +1,8 @@
+{
+  "name": "era5viewer-browser-checks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optional browser tests; Node is not needed to run era5viewer.",
+  "scripts": { "test:browser": "node scripts/browser-check.cjs", "test:frontend": "node scripts/frontend-check.cjs" },
+  "devDependencies": { "playwright": "^1.55.0", "jsdom": "^26.1.0", "@napi-rs/canvas": "^0.1.80" }
+}

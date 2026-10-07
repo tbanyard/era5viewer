@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>era5viewer · Explore your atmosphere</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%230f766e'/%3E%3Ctext x='7' y='28' fill='white' font-size='24' font-family='sans-serif'%3EE5%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="web/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="web/style.css">
+  <script src="web/vendor/leaflet/leaflet.js" defer></script>
+  <script src="web/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <button id="sidebar-toggle" class="icon-button mobile-only" title="Show controls" aria-label="Show controls">☰</button>
+    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">E<span>5</span></span><span>era5<strong>viewer</strong><small>YOUR ATMOSPHERE, EXPLORED</small></span></a>
+    <div class="header-divider"></div>
+    <div class="date-nav"><button id="prev-day" class="icon-button" title="Previous available day" aria-label="Previous available day">‹</button><label class="sr-only" for="date">Date in UTC</label><input id="date" type="date"><button id="next-day" class="icon-button" title="Next available day" aria-label="Next available day">›</button></div>
+    <span id="time-label" class="time-label">— UTC</span>
+    <div class="header-right"><button id="refresh" class="icon-button" title="Rescan data files" aria-label="Rescan data files">↻</button><button id="connection-open" class="connection-button"><i id="connection-dot"></i><span id="connection-state">Connecting</span></button></div>
+  </header>
+  <main class="workspace">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-heading"><span class="eyebrow">ERA5 · MODEL LEVELS</span><h1>Explore the atmosphere.</h1><p>One time. Any layer. Every location.</p></div>
+      <div class="controls">
+        <section class="group">
+          <div class="section-heading"><h2>Atmospheric field</h2><span id="units-badge" class="badge">°C</span></div>
+          <label class="sr-only" for="variable">Atmospheric field</label>
+          <select id="variable" disabled><option value="t">Temperature</option></select>
+          <div class="field-chips" aria-label="Quick fields"><button data-field="t" class="chip active">T</button><button data-field="u" class="chip">U</button><button data-field="v" class="chip">V</button><button data-field="wind_speed" class="chip">Speed</button></div>
+          <label id="temp-unit-row" class="inline-setting" for="temperature-unit">Temperature units<select id="temperature-unit"><option value="C">°C</option><option value="K">K</option></select></label>
+        </section>
+        <section class="group">
+          <div class="section-heading"><h2>Vertical layer</h2><span id="layer-badge" class="badge">5 km AGL</span></div>
+          <div class="segmented" role="group" aria-label="Vertical coordinate"><button data-mode="model">Model</button><button data-mode="pressure">Pressure</button><button data-mode="height" class="active">Height</button></div>
+          <div class="layer-input"><label id="level-label" for="level">Height</label><input id="level" type="number" min="0" max="100" step="0.1" value="5"><span id="level-unit">km</span></div>
+          <label class="sr-only" for="level-slider">Vertical layer slider</label><input id="level-slider" type="range" min="0.1" max="40" step="0.1" value="5">
+          <div class="range-ends"><span id="level-min">0.1 km</span><span id="level-max">40 km</span></div>
+          <div id="presets" class="presets"></div>
+          <label id="height-reference-row" class="inline-setting" for="height-reference">Height reference<select id="height-reference"><option value="agl">Above ground</option><option value="msl">Above sea level</option></select></label>
+          <p id="level-note" class="note">Approximate geopotential height.</p>
+        </section>
+        <section class="group">
+          <div class="section-heading"><h2>Map display</h2><button id="fit-data" class="text-button">Fit data ↗</button></div>
+          <label class="check"><input id="wind-toggle" type="checkbox" checked><span>Wind arrows</span><small>U + V</small></label>
+          <label class="check"><input id="grid-toggle" type="checkbox" checked><span>Latitude / longitude grid</span></label>
+          <label class="check"><input id="basemap-toggle" type="checkbox" checked><span>Street basemap</span><small>online</small></label>
+          <label class="range-label" for="opacity">Field opacity <output id="opacity-label">76%</output></label><input id="opacity" type="range" min="0" max="100" step="1" value="76">
+          <details class="display-options"><summary>Colour range</summary><label class="check"><input id="auto-range" type="checkbox" checked><span>Automatic range (2–98%)</span></label><div class="two-columns"><label>Minimum<input id="range-min" type="number" step="any" value="-40"></label><label>Maximum<input id="range-max" type="number" step="any" value="20"></label></div><p class="note">Turn automatic range off to keep one scale through an animation.</p></details>
+        </section>
+        <section class="group">
+          <div class="section-heading"><h2>Available dates</h2><span id="day-count" class="badge">—</span></div>
+          <div class="two-columns date-picker"><label for="year">Year<select id="year" disabled></select></label><label for="available-date">Day<select id="available-date" disabled></select></label></div>
+        </section>
+        <section class="group"><a id="slice-export" class="button secondary disabled" href="#" download="era5-slice.csv">↓ Export this layer as CSV</a><p class="note">Exports original units and grid coordinates.</p></section>
+      </div>
+      <footer class="sidebar-foot"><span id="source-path">Waiting for the local data reader.</span><span id="file-info"></span></footer>
+    </aside>
+    <section class="map-area" aria-label="Atmospheric field map">
+      <div id="map"></div><canvas id="field-canvas" aria-hidden="true"></canvas><canvas id="overlay-canvas" aria-hidden="true"></canvas>
+      <div class="map-heading"><div><span class="eyebrow">ATMOSPHERIC EXPLORER</span><h2 id="map-field">Temperature</h2><p id="map-context">Connect to your local ERA5 archive</p></div><span id="data-badge" class="map-badge">NETCDF · LOCAL</span></div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div id="loading" class="loading" hidden><span class="spinner"></span> Reading atmosphere…</div>
+      <div id="empty-state" class="empty-state"><div class="empty-icon">⌁</div><h2>Your archive, on the map.</h2><p id="empty-message">Connecting to the ERA5 reader…</p><button id="empty-connect" class="button" hidden>Connection settings</button></div>
+      <div id="hover-readout" class="hover-readout" hidden></div>
+      <div id="colour-legend" class="colour-legend" hidden><div class="legend-heading"><strong id="legend-title">Temperature</strong><span id="legend-unit">°C</span></div><div id="legend-gradient" class="legend-gradient"></div><div class="legend-ticks"><span id="legend-low">—</span><span id="legend-mid">—</span><span id="legend-high">—</span></div><p id="legend-coverage">Transparent areas have no represented data.</p></div>
+      <button id="point-open" class="point-open button secondary" hidden>⌖ Selected point</button>
+      <aside id="point-panel" class="point-panel" hidden aria-label="Selected location profile">
+        <div class="point-heading"><div><span class="eyebrow">SELECTED LOCATION</span><h2 id="point-coordinates">—</h2></div><button id="point-close" class="icon-button" aria-label="Close point panel">×</button></div>
+        <p id="point-context" class="point-context"></p><div id="point-status" class="note" role="status"></div>
+        <div id="point-metrics" class="point-metrics"></div>
+        <div class="profile-heading"><h3>Vertical profile</h3><label class="sr-only" for="profile-variable">Profile variable</label><select id="profile-variable"><option value="t">Temperature</option><option value="wind_speed">Wind speed</option><option value="u">U wind</option><option value="v">V wind</option></select></div>
+        <div id="profile-chart" class="profile-chart"></div>
+        <p id="profile-note" class="note"></p><a id="profile-export" class="text-button disabled" href="#" download="era5-profile.csv">↓ Export profile CSV</a>
+        <details class="drift-tools"><summary>Trace the wind <span>↗</span></summary><p class="note">Horizontal drift from this point, on the selected layer.</p><div class="drift-form"><label for="drift-hours">Duration (hours)<input id="drift-hours" type="number" min="0.05" max="24" step="0.25" value="1"></label><button id="drift-run" class="button">Trace drift</button></div><p id="drift-status" class="note" role="status"></p><button id="drift-export" class="text-button" hidden>↓ Export track CSV</button><button id="drift-clear" class="text-button" hidden>Clear track</button></details>
+      </aside>
+      <footer class="timeline"><div class="timeline-controls"><button id="prev-time" class="icon-button" title="Previous available time" aria-label="Previous available time">‹</button><button id="play" class="play-button" title="Play available times" aria-label="Play available times" disabled>▶</button><button id="next-time" class="icon-button" title="Next available time" aria-label="Next available time">›</button></div><div class="timeline-track"><label class="sr-only" for="time-slider">Available time in UTC</label><input id="time-slider" type="range" min="0" max="0" value="0" step="1" disabled><div id="time-ticks" class="time-ticks"></div></div><span id="time-count" class="timeline-count">— times</span></footer>
+    </section>
+  </main>
+  <dialog id="connection-dialog">
+    <div class="dialog-heading"><h2>Connect to your ERA5 archive</h2><button id="connection-close" class="icon-button" aria-label="Close connection settings">×</button></div>
+    <p>Run the local reader on the machine containing your data:</p><pre><code>cd /data1/tim/era5viewer
+./start.sh</code></pre><p>Then use this page, or open <strong>http://127.0.0.1:8765</strong>. The data directory is set in <code>config.json</code>; the default is <code>/data3/ERA5</code>.</p>
+    <form id="connection-form"><label for="api-url">Reader address<input id="api-url" type="url" value="http://127.0.0.1:8765" required></label><button class="button" type="submit">Connect</button></form>
+    <p class="note">For a remote data machine, use an SSH tunnel: <code>ssh -L 8765:127.0.0.1:8765 user@data-machine</code>.</p>
+  </dialog>
+</body>
+</html>

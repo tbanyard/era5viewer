@@ -1,0 +1,6 @@
+{
+  "data_root": "/data3/ERA5",
+  "host": "127.0.0.1",
+  "port": 8765,
+  "cache_mb": 256
+}
