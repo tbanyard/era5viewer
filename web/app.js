@@ -7,14 +7,16 @@
   function stored(key, fallback) { try { return localStorage.getItem("era5viewer." + key) || fallback; } catch (_) { return fallback; } }
   function remember(key, value) { try { localStorage.setItem("era5viewer." + key, value); } catch (_) {} }
   const state = {
-    base: /https?:/.test(location.protocol) ? location.origin : stored("api", "http://127.0.0.1:8766"),
+    base: /https?:/.test(location.protocol) ? location.origin : stored("api", "http://127.0.0.1:8767"),
     catalog: null, times: [], ti: 0, date: "", variable: "t", mode: "height", value: 5, reference: "msl",
     preferredReference: stored("heightReference", "msl"),
     grid: null, selected: null, profile: null, playing: false, timer: null,
     serial: 0, daySerial: 0, connectSerial: 0, driftSerial: 0, sliceAbort: null, pointAbort: null,
     drift: null, tracks: [], trackId: 0, activeTrack: null, tracing: false,
     fitted: false, scale: [-40, 20], profileView: null, profilePlot: null,
-    cacheEpoch: 0, prefetchSerial: 0, playSerial: 0, contourCache: null
+    cacheEpoch: 0, prefetchSerial: 0, playSerial: 0, contourCache: null,
+    compassCoordinates: stored("compassCoordinates", "0") === "1",
+    configuration: null, configDraft: null, configEdited: false
   };
   const frames = {items: new Map(), bytes: 0, limit: 64*1024*1024};
   const pendingFrames = new Map();
@@ -62,6 +64,16 @@
     return variable === "t" && $("temperature-unit").value === "C" ? value - 273.15 : value;
   }
   function format(value, digits = 1) { return value == null || !Number.isFinite(value) ? "—" : value.toFixed(digits); }
+  function coordinateLabel(lat, lon, digits=3) {
+    lon=((lon+180)%360+360)%360-180;
+    if(state.compassCoordinates)return Math.abs(lat).toFixed(digits)+"°"+(lat<0?"S":"N")+", "+Math.abs(lon).toFixed(digits)+"°"+(lon<0?"W":"E");
+    return lat.toFixed(digits)+"°, "+lon.toFixed(digits)+"°";
+  }
+  function updateCoordinates() {
+    if(state.selected)$("point-coordinates").textContent=coordinateLabel(state.selected.lat,state.selected.lon);
+    const b=$("coordinate-toggle"),label=state.compassCoordinates?"Use signed coordinates":"Use compass directions";
+    b.setAttribute("aria-pressed",String(state.compassCoordinates));b.title=label;b.setAttribute("aria-label",label);
+  }
   function args(extra = {}) {
     const r = current();
     if (!r) return {};
@@ -94,6 +106,7 @@
     abortLoads(); state.serial++; state.grid = null; state.profile = null;
     $("colour-legend").hidden = true; $("hover-readout").hidden = true;
     $("slice-export").classList.add("disabled"); $("profile-export").classList.add("disabled");
+    $("layer-netcdf").classList.add("disabled");
     $("map-png").disabled=true; $("profile-png").disabled=true;
     state.profilePlot=null;
     $("point-metrics").replaceChildren(); $("profile-chart").replaceChildren();
@@ -268,6 +281,7 @@
       if (!state.scale.every(Number.isFinite) || state.scale[1] <= state.scale[0]) state.scale = [0,1];
       updateLegend(); scheduleDraw();
       $("slice-export").href = url("/api/export/slice", requestArgs); $("slice-export").classList.remove("disabled");
+      $("layer-netcdf").href=url("/api/export/layer.nc",requestArgs);$("layer-netcdf").classList.remove("disabled");
       $("map-png").disabled=false;
       const warnings = data.record.warnings.filter(w => state.mode === "height" || !w.includes("height") && !w.includes("Height") && !w.includes("geopotential"));
       if (!data.stats.valid) notice("This layer is outside the represented column or contains no valid values. Try another layer.");
@@ -281,7 +295,7 @@
     } catch (error) {
       if (error.name !== "AbortError" && serial === state.serial) {
         state.grid = null; $("colour-legend").hidden = true;
-        $("slice-export").classList.add("disabled");$("map-png").disabled=true;
+        $("slice-export").classList.add("disabled");$("layer-netcdf").classList.add("disabled");$("map-png").disabled=true;
         scheduleDraw(); notice(error.message, true);
         empty("This selection could not be loaded.\n" + error.message);
       }
@@ -387,16 +401,20 @@
     empty("Connecting to the ERA5 reader…");
     try {
       const timeout = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(15000) : undefined;
-      const catalog = await api("/api/catalog", refresh ? {refresh: 1} : {}, timeout);
+      const [catalog,configuration] = await Promise.all([
+        api("/api/catalog", refresh ? {refresh: 1} : {}, timeout),
+        api("/api/config",{},timeout).catch(()=>null)
+      ]);
       if (serial !== state.connectSerial) return;
       state.catalog = catalog;
+      state.configuration=configuration;updateReaderConfiguration();
       $("connection-state").textContent = "Local archive"; $("connection-dot").className = "online";
       $("source-path").textContent = catalog.root;
       $("day-count").textContent = catalog.dates.length.toLocaleString() + " days";
       $("year").replaceChildren(...catalog.years.map(y=>new Option(y,y)));
       $("year").disabled = !catalog.dates.length; $("available-date").disabled = !catalog.dates.length;
       if (!catalog.dates.length) {
-        empty("No ERA5 NetCDF files were found in " + catalog.root + ".\nCheck data_root in config.json, then rescan.", true);
+        empty("No ERA5 NetCDF files were found in " + catalog.root + ".\nCheck the data directory in your reader configuration, then rescan.", true);
         notice(catalog.messages.join(" · ")); $("loading").hidden = true; return;
       }
       $("date").min = catalog.dates[0]; $("date").max = catalog.dates[catalog.dates.length-1];
@@ -501,9 +519,30 @@
       ctx.drawImage(small,0,0,size.x,size.y);
     }
     if ($("grid-toggle").checked) drawGrid(size);
+    if ($("coastline-toggle").checked) drawCoastlines(size);
     if(g&&$("contour-toggle").checked)drawContours(size,g);
     if (g && $("wind-toggle").checked && g.arrays.u && g.arrays.v) drawWind(size,g);
     drawTracks(size);
+  }
+  function drawCoastlines(size) {
+    const coast=window.ERA5Coastlines;if(!coast)return;
+    const bounds=map.getBounds(),west=bounds.getWest(),east=bounds.getEast();
+    overlay.save();overlay.beginPath();overlay.rect(0,0,size.x,size.y);overlay.clip();
+    overlay.lineWidth=.9;overlay.strokeStyle="rgba(25,48,49,.85)";overlay.lineJoin="round";overlay.lineCap="round";
+    overlay.beginPath();
+    for(const line of coast.lines) {
+      const [x0,y0,x1,y1]=line.bounds;
+      if(y1<bounds.getSouth()||y0>bounds.getNorth())continue;
+      const first=Math.ceil((west-x1)/360),last=Math.floor((east-x0)/360);
+      for(let copy=first;copy<=last;copy++) {
+        let firstPoint=true;
+        for(const [lon,lat] of line.points) {
+          const p=map.latLngToContainerPoint([Math.max(-85.05,Math.min(85.05,lat)),lon+copy*360]);
+          if(firstPoint){overlay.moveTo(p.x,p.y);firstPoint=false;}else overlay.lineTo(p.x,p.y);
+        }
+      }
+    }
+    overlay.stroke();overlay.restore();
   }
   function drawGrid(size) {
     const b=map.getBounds(), step=map.getZoom()>=7?1:map.getZoom()>=5?5:map.getZoom()>=3?15:30;
@@ -593,7 +632,7 @@
     }
     for(const layer of [fieldCanvas,overlayCanvas])c.drawImage(layer,0,0,layer.width,h/size.y*layer.height,0,head,w,h);
     c.restore();
-    c.fillStyle="#183033";c.font="bold 19px sans-serif";c.fillText((NAMES[state.variable]||fieldMeta().name)+" · "+units(),14,25,w-28);
+    c.fillStyle="#183033";c.font="bold 19px sans-serif";c.fillText("ERA5 · "+(NAMES[state.variable]||fieldMeta().name)+" · "+units(),14,25,w-28);
     c.font="12px sans-serif";c.fillText(state.grid.record.datetime.replace("T"," ").replace("Z"," UTC")+" · "+layerLabel()+" · "+resolutionLabel(state.grid.record),14,47,w-28);
     const left=24,width=Math.max(50,Math.min(520,w-48)),barY=head+h+24,gradient=c.createLinearGradient(left,0,left+width,0),colours=palette();
     colours.forEach((rgb,i)=>gradient.addColorStop(i/(colours.length-1),"rgb("+rgb.join(",")+")"));c.fillStyle=gradient;c.fillRect(left,barY,width,13);
@@ -602,7 +641,7 @@
     for(const v of ticks){const x=left+(v-lo)/(hi-lo)*width;c.textAlign=v===lo?"left":v===hi?"right":"center";c.fillText(plots.tickLabel(v),x,barY+29);}
     c.textAlign="left";c.font="11px sans-serif";c.fillText($("legend-title").textContent+" ("+units()+") · "+$("range-mode").selectedOptions[0].textContent,left,barY+49,w-48);
     c.font="10px sans-serif";c.fillStyle="#607367";
-    const notes=[];if(state.mode==="height")notes.push("Geopotential height"+(current().fields.some(f=>f.id==="q")?"":" · dry air approximation (q absent)"));if(state.tracks.length)notes.push(state.tracks.length+" horizontal wind track"+(state.tracks.length===1?"":"s"));if(tiles)notes.push("© OpenStreetMap contributors");
+    const notes=[];if(state.mode==="height")notes.push("Geopotential height"+(current().fields.some(f=>f.id==="q")?"":" · dry air approximation (q absent)"));if(state.tracks.length)notes.push(state.tracks.length+" horizontal wind track"+(state.tracks.length===1?"":"s"));if($("coastline-toggle").checked)notes.push("Coastlines: Natural Earth");if(tiles)notes.push("© OpenStreetMap contributors");
     c.fillText(notes.join(" · "),left,barY+69,w-48);
     return canvas;
   }
@@ -611,8 +650,8 @@
     const svg=plot.svg.replace('<svg ', '<svg width="900" height="650" '),image=new Image();
     await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(new Error("Could not render the profile PNG."));image.src="data:image/svg+xml;base64,"+btoa(unescape(encodeURIComponent(svg)));});
     const canvas=document.createElement("canvas");canvas.width=900;canvas.height=760;const c=canvas.getContext("2d");c.fillStyle="white";c.fillRect(0,0,900,760);
-    c.font="bold 22px sans-serif";c.fillStyle="#183033";c.fillText((NAMES[$("profile-variable").value]||$("profile-variable").value)+" profile",24,29);
-    c.font="14px sans-serif";c.fillText(profile.record.datetime.replace("T"," ").replace("Z"," UTC")+" · "+profile.latitude.toFixed(3)+"°, "+profile.longitude.toFixed(3)+"°",24,55);
+    c.font="bold 22px sans-serif";c.fillStyle="#183033";c.fillText("ERA5 · "+(NAMES[$("profile-variable").value]||$("profile-variable").value)+" profile",24,29);
+    c.font="14px sans-serif";c.fillText(profile.record.datetime.replace("T"," ").replace("Z"," UTC")+" · "+coordinateLabel(profile.latitude,profile.longitude),24,55);
     c.drawImage(image,0,75,900,650);c.font="12px sans-serif";c.fillStyle="#607367";c.fillText($("profile-note").textContent,24,749,852);return canvas;
   }
   async function saveCanvas(canvas,name) {
@@ -631,7 +670,7 @@
   function selectPoint(ll) {
     state.selected={lat:ll.lat,lon:ll.lng}; state.profile=null; state.profileView=null; state.profilePlot=null; $("profile-png").disabled=true;
     marker.setLatLng(ll).addTo(map); showPointPanel();
-    $("point-coordinates").textContent=ll.lat.toFixed(3)+"°, "+(((ll.lng+180)%360+360)%360-180).toFixed(3)+"°";
+    updateCoordinates();
     $("point-status").textContent=state.grid?"Reading selected point…":"Load a layer to inspect this point.";
     $("point-metrics").replaceChildren();$("profile-chart").replaceChildren();
     if(state.grid) loadPoint();
@@ -736,8 +775,8 @@
     } catch(error){if(serial===state.driftSerial)$("drift-status").textContent=error.message;}
     finally{if(serial===state.driftSerial){state.tracing=false;$("drift-run").disabled=false;}}
   }
-  function downloadText(name,text) {
-    const object=URL.createObjectURL(new Blob([text],{type:"text/csv;charset=utf-8"})),a=document.createElement("a");
+  function downloadText(name,text,type="text/csv;charset=utf-8") {
+    const object=URL.createObjectURL(new Blob([text],{type})),a=document.createElement("a");
     a.href=object;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(object),5000);
   }
   function hover(event) {
@@ -745,7 +784,7 @@
     const ll=event.latlng, raw=sample(state.grid,"values",ll.lat,ll.lng);
     if(!Number.isFinite(raw)) {$("hover-readout").hidden=true;return;}
     const el=$("hover-readout"),size=map.getSize();
-    el.textContent=format(convert(raw))+" "+units()+"\n"+ll.lat.toFixed(2)+"°, "+(((ll.lng+180)%360+360)%360-180).toFixed(2)+"°";
+    el.textContent=format(convert(raw))+" "+units()+"\n"+coordinateLabel(ll.lat,ll.lng,2);
     el.hidden=false;el.style.left=Math.min(event.containerPoint.x+15,size.x-170)+"px";el.style.top=Math.min(event.containerPoint.y+15,size.y-135)+"px";
   }
   map.on("move zoom resize",scheduleDraw);map.on("click",e=>selectPoint(e.latlng));map.on("mousemove",hover);
@@ -777,6 +816,10 @@
   $("play").onclick=()=>{if(state.playing)stopPlay(true);else startPlay();};
   $("opacity").oninput=()=>{$("opacity-label").textContent=$("opacity").value+"%";scheduleDraw();};
   $("wind-toggle").onchange=()=>{invalidate();loadSlice();};$("grid-toggle").onchange=scheduleDraw;
+  $("coastline-toggle").checked=stored("coastlines","0")==="1";
+  const coastAttribution='<a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a>';
+  function coastlineChanged(){remember("coastlines",$("coastline-toggle").checked?"1":"0");map.attributionControl[$("coastline-toggle").checked?"addAttribution":"removeAttribution"](coastAttribution);scheduleDraw();}
+  $("coastline-toggle").onchange=coastlineChanged;if($("coastline-toggle").checked)coastlineChanged();
   $("basemap-toggle").onchange=()=>{$("basemap-toggle").checked?basemap.addTo(map):map.removeLayer(basemap);};
   $("range-mode").onchange=()=>{updateScale();updateLegend();state.contourCache=null;scheduleDraw();};
   for(const id of ["range-min","range-max"])$(id).onchange=()=>{
@@ -789,6 +832,7 @@
   $("sidebar-toggle").onclick=()=>{$("sidebar").classList.toggle("open");setTimeout(()=>map.invalidateSize(),0);};
   $("point-close").onclick=()=>{$("point-panel").hidden=true;$("point-open").hidden=false;$("colour-legend").classList.remove("panel-visible");};
   $("point-open").onclick=showPointPanel;
+  $("coordinate-toggle").onclick=()=>{state.compassCoordinates=!state.compassCoordinates;remember("compassCoordinates",state.compassCoordinates?"1":"0");updateCoordinates();};
   $("profile-variable").onchange=$("profile-axis").onchange=()=>{state.profileView=null;renderProfile();};
   $("profile-reset").onclick=()=>{state.profileView=null;renderProfile();};
   $("notice-close").onclick=()=>{dismissedNotices.add($("notice-text").textContent);$("notice").hidden=true;};
@@ -801,7 +845,90 @@
     downloadText("era5-wind-drift.csv","datetime_utc,latitude,longitude,elapsed_seconds,mode,level_value,height_reference\n"+
       state.drift.path.map(p=>[p.datetime,p.latitude,p.longitude,p.elapsed_seconds,state.drift.mode,state.drift.value,state.drift.reference].join(",")).join("\n")+"\n");
   };
-  function openConnection() {$("api-url").value=state.base;$("connection-dialog").showModal();}
+  function shellQuote(text) {return "'"+String(text).replace(/'/g,"'\\''")+"'";}
+  function readConfigEditor() {
+    const data_root=$("config-root").value.trim(),host=$("config-host").value.trim();
+    const port=Number($("config-port").value),cache_mb=Number($("config-cache").value);
+    const path=$("config-path").value.trim();
+    if(!data_root||!host)throw new Error("Enter a data directory and reader bind address.");
+    if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Choose a reader port between 1024 and 65535.");
+    if(!Number.isInteger(cache_mb)||cache_mb<16||cache_mb>1048576)throw new Error("Cache size must be an integer of at least 16 MiB.");
+    if(!path.toLowerCase().endsWith(".json")||/[\r\n\0]/.test(path))throw new Error("Choose a personal filename ending in .json.");
+    const shared=(state.configuration?.project||"/data1/tim/era5viewer")+"/config.json";
+    if(path===shared)throw new Error("Choose a file in your own directory for your personal configuration.");
+    return {data_root,host,port,cache_mb};
+  }
+  function fillConfigEditor(settings,path) {
+    const defaults={data_root:"/data3/ERA5",host:"127.0.0.1",port:8767,cache_mb:256};
+    const c=Object.assign(defaults,settings);
+    $("config-root").value=c.data_root;$("config-host").value=c.host;
+    $("config-port").value=c.port||8767;$("config-cache").value=c.cache_mb;
+    $("config-path").value=path||stored("configPath","~/era5viewer.json");
+    state.configDraft=c;updateConfigPreview();
+  }
+  function updateConfigPreview() {
+    try {
+      const c=readConfigEditor(),path=$("config-path").value.trim();state.configDraft=c;
+      $("config-json").textContent=JSON.stringify(c,null,2)+"\n";$("config-download").disabled=false;
+      const project=state.configuration?.project||"/data1/tim/era5viewer";
+      const personal=$("personal-config").open||state.configuration?.personal;
+      $("config-command").textContent="bash "+shellQuote(project+"/start.sh")+(personal?" --config "+shellQuote(path):
+        " --data-root "+shellQuote(c.data_root)+" --host "+shellQuote(c.host)+" --port "+c.port+" --cache-mb "+c.cache_mb);
+      const target=c.host==="0.0.0.0"?"127.0.0.1":c.host;
+      const tunnelTarget=target.includes(":")?"["+target+"]":target;
+      const user=state.configuration?.user||"user";
+      $("config-tunnel").textContent="ssh -N -L "+c.port+":"+tunnelTarget+":"+c.port+" "+user+"@data-machine";
+      $("config-address").textContent="http://127.0.0.1:"+c.port;
+      $("config-status").textContent="";$("config-status").classList.remove("error");
+    } catch(error) {
+      $("config-download").disabled=true;$("config-status").textContent=error.message;$("config-status").classList.add("error");
+      $("config-json").textContent="";$("config-command").textContent="Complete the personal settings above.";
+    }
+  }
+  function updateReaderConfiguration() {
+    const info=state.configuration;
+    if(info){
+      $("active-config").textContent=(info.personal?"Personal configuration: ":"Shared default: ")+(info.config_file||"reader settings")+" · user "+info.user+" · port "+info.settings.port;
+      $("app-version").textContent="v"+info.version.replace(/\.0$/,"");
+    }else $("active-config").textContent="Connect to a reader to see its active configuration. You can prepare a personal file below.";
+    if(!state.configDraft||!state.configEdited)fillConfigEditor(info?.settings,info?.personal?info.config_file:undefined);
+    else updateConfigPreview();
+  }
+  for(const id of ["config-root","config-host","config-port","config-cache","config-path"])$(id).oninput=()=>{state.configEdited=true;updateConfigPreview();remember("configPath",$("config-path").value);};
+  $("personal-config").ontoggle=updateConfigPreview;
+  $("config-current").onclick=()=>{state.configEdited=false;fillConfigEditor(state.configuration?.settings,state.configuration?.personal?state.configuration.config_file:undefined);};
+  $("config-load").onclick=()=>$("config-file").click();
+  $("config-file").onchange=async()=>{
+    const file=$("config-file").files[0];if(!file)return;
+    try {
+      if(file.size>65536)throw new Error("Configuration is too large (maximum 64 KiB).");
+      const text=file.text?await file.text():await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error("Could not read the JSON file."));reader.readAsText(file);});
+      const c=JSON.parse(text),known=["data_root","host","port","cache_mb"];
+      if(!c||Array.isArray(c)||typeof c!=="object"||Object.keys(c).some(key=>!known.includes(key)))throw new Error("Use a JSON object with data_root, host, port and cache_mb settings.");
+      for(const key of ["data_root","host"])if(key in c&&(typeof c[key]!=="string"||!c[key].trim()))throw new Error(key+" must be a nonempty string.");
+      for(const key of ["port","cache_mb"])if(key in c&&(!Number.isInteger(c[key])||typeof c[key]!=="number"))throw new Error(key+" must be an integer.");
+      if(c.port!==undefined&&(c.port<1024||c.port>65535))throw new Error("Choose a reader port between 1024 and 65535.");
+      if(c.cache_mb!==undefined&&(c.cache_mb<16||c.cache_mb>1048576))throw new Error("Cache size must be at least 16 MiB.");
+      state.configEdited=true;$("personal-config").open=true;fillConfigEditor(c,"~/"+file.name);
+      $("config-status").textContent="Loaded "+file.name+" into the editor. Download the JSON when ready.";
+    }catch(error){$("config-status").textContent=error.message;$("config-status").classList.add("error");}
+    finally{$("config-file").value="";}
+  };
+  $("config-download").onclick=()=>{
+    try {
+      const c=readConfigEditor(),path=$("config-path").value.trim(),name=path.split(/[\\/]/).pop();
+      downloadText(name,JSON.stringify(c,null,2)+"\n","application/json");
+      $("personal-config").open=true;updateConfigPreview();
+      $("config-status").textContent="Downloaded "+name+". Place it at "+path+" on the data machine, then use the startup command below.";
+    }catch(error){$("config-status").textContent=error.message;$("config-status").classList.add("error");}
+  };
+  async function copyInstruction(id) {
+    try {await navigator.clipboard.writeText($(id).textContent);$("config-status").textContent="Command copied.";}
+    catch(_){const selection=window.getSelection(),range=document.createRange();range.selectNodeContents($(id));selection.removeAllRanges();selection.addRange(range);$("config-status").textContent="Command selected; copy it using Ctrl+C or ⌘C.";}
+  }
+  $("config-command-copy").onclick=()=>copyInstruction("config-command");$("config-tunnel-copy").onclick=()=>copyInstruction("config-tunnel");
+  $("layer-netcdf").onclick=e=>{if($("layer-netcdf").classList.contains("disabled"))e.preventDefault();else stopPlay(true);};
+  function openConnection() {$("api-url").value=state.base;updateReaderConfiguration();$("connection-dialog").showModal();}
   $("connection-open").onclick=openConnection;$("empty-connect").onclick=openConnection;
   $("connection-close").onclick=()=>{$("connection-dialog").close();};
   $("connection-form").onsubmit=e=>{
@@ -816,6 +943,6 @@
   }
   window.addEventListener("pagehide",dispose);
   // Exposed to make scientific sampling and asynchronous UI behaviour testable.
-  window.era5viewer={state,map,connect,loadSlice,sample,selectPoint,changeTime,dispose,captureMap,captureProfile,setProfileView,getFrame};
-  resize();configureLayer();updateHead();connect();
+  window.era5viewer={state,map,connect,loadSlice,sample,selectPoint,changeTime,dispose,captureMap,captureProfile,setProfileView,getFrame,coordinateLabel,readConfigEditor};
+  updateCoordinates();updateReaderConfiguration();resize();configureLayer();updateHead();connect();
 })();

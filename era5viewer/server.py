@@ -1,7 +1,7 @@
 """A read-only local HTTP service; no database, Node build, or hosted service."""
-import argparse
 import base64
 import csv
+import getpass
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -16,6 +16,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 import numpy as np
 
 from .data import Archive, DataError
+from .configuration import parse_settings
+from .export import layer_netcdf
 from .trajectory import trace
 from . import __version__
 
@@ -49,10 +51,11 @@ def parameters(query):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "era5viewer/1.1"
+    server_version = "era5viewer/" + __version__
 
-    def __init__(self, *args, archive, **kwargs):
+    def __init__(self, *args, archive, configuration=None, **kwargs):
         self.archive = archive
+        self.configuration = configuration
         super().__init__(*args, **kwargs)
 
     def cors(self):
@@ -97,14 +100,31 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route == "/api/status":
                 return self.respond({"version": __version__, **self.archive.catalog()})
+            if route == "/api/config":
+                active = self.configuration or {}
+                return self.respond({"version": __version__, "user": getpass.getuser(),
+                    "project": str(PROJECT), "config_file": active.get("config_file"),
+                    "personal": active.get("personal", False),
+                    "settings": {"data_root": str(self.archive.root),
+                        "host": active.get("host", self.server.server_address[0]),
+                        "port": self.server.server_port,
+                        "cache_mb": self.archive.cache.limit // 1024**2}})
             if route == "/api/catalog":
                 if query.get("refresh") == ["1"]:
                     self.archive.scan()
                 return self.respond(self.archive.catalog())
             if route == "/api/day":
                 return self.respond(self.archive.day(query.get("date", [""])[0]))
-            if route in ("/api/slice", "/api/profile", "/api/export/slice", "/api/export/profile", "/api/drift"):
+            if route in ("/api/slice", "/api/profile", "/api/export/slice", "/api/export/layer.nc", "/api/export/profile", "/api/drift"):
                 args = parameters(query)
+                if route == "/api/export/layer.nc":
+                    body = layer_netcdf(self.archive, **args)
+                    timestamp = self.archive.record(args["fid"], args["index"])["datetime"].replace("-", "").replace(":", "")
+                    variable = "".join(c for c in args["variable"] if c.isalnum() or c == "_") or "field"
+                    layer = f'{args["value"]:g}'.replace(".", "p")
+                    reference = "-" + args["reference"] if args["mode"] == "height" else ""
+                    filename = f'era5-{variable}-{timestamp}-{args["mode"]}-{layer}{reference}.nc'
+                    return self.respond(body, "application/x-netcdf", filename=filename)
                 if route in ("/api/profile", "/api/export/profile", "/api/drift"):
                     try:
                         lat, lon = float(query["lat"][0]), float(query["lon"][0])
@@ -173,26 +193,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv=None):
-    defaults = {"data_root": "/data3/ERA5", "host": "127.0.0.1", "port": 8766, "cache_mb": 256}
-    config = PROJECT/"config.json"
-    if config.exists():
-        defaults.update(json.loads(config.read_text()))
-    parser = argparse.ArgumentParser(description="Local browser viewer for ERA5 L137 NetCDF files.")
-    parser.add_argument("--data-root", default=defaults["data_root"])
-    parser.add_argument("--host", default=defaults["host"])
-    parser.add_argument("--port", type=int, default=defaults["port"])
-    parser.add_argument("--cache-mb", type=int, default=defaults["cache_mb"])
-    args = parser.parse_args(argv)
+    args = parse_settings(PROJECT, argv)
     archive = Archive(args.data_root, args.cache_mb)
-    handler = partial(Handler, archive=archive)
+    configuration = {"config_file": args.config, "host": args.host,
+                     "personal": Path(args.config).resolve() != (PROJECT / "config.json").resolve()}
+    handler = partial(Handler, archive=archive, configuration=configuration)
     try:
         server = ThreadingHTTPServer((args.host, args.port), handler)
     except OSError as exc:
-        print(f"Cannot start era5viewer: {exc}. Try --port 8767.", file=sys.stderr)
+        print(f"Cannot start era5viewer: {exc}. Try --port 8768.", file=sys.stderr)
         return 1
     server.daemon_threads = True
     print(f"\nera5viewer {__version__}  •  {archive.catalog()['engine']}", flush=True)
     print(f"Data: {archive.root}  •  {len(archive.dates)} indexed days", flush=True)
+    print(f"Config: {args.config}  •  reader user: {getpass.getuser()}", flush=True)
     print(f"Open http://{args.host}:{server.server_port}/ or open index.html directly.\nCtrl+C to stop.\n", flush=True)
     try:
         server.serve_forever()

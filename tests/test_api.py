@@ -79,6 +79,25 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.get("/web/app.js")[0],200)
         self.assertEqual(self.get("/server.py")[0],404)
         self.assertEqual(self.get("/web/../config.json")[0],404)
+        self.assertEqual(self.get("/web/coastlines.js")[0],200)
+
+    def test_layer_netcdf_is_downloaded_and_errors_are_json(self):
+        status,headers,body=self.get("/api/export/layer.nc",dict(self.args,mode="model",value=137))
+        self.assertEqual(status,200)
+        self.assertEqual(headers["Content-Type"],"application/x-netcdf")
+        self.assertTrue(headers["Content-Disposition"].endswith('.nc"'))
+        self.assertEqual(body[:4],b"CDF\x02")
+        self.assertEqual(self.get("/api/export/layer.nc",dict(self.args,index=-1))[0],400)
+        self.assertEqual(self.get("/api/export/layer.nc",dict(self.args,variable="absent"))[0],400)
+
+    def test_configuration_endpoint_exposes_effective_reader_settings_read_only(self):
+        status,headers,body=self.get("/api/config")
+        self.assertEqual(status,200)
+        info=json.loads(body)
+        self.assertEqual(info["version"],"1.2.0")
+        self.assertEqual(info["settings"]["data_root"],str(self.archive.root))
+        self.assertEqual(info["settings"]["port"],self.server.server_port)
+        self.assertEqual(info["settings"]["cache_mb"],16)
 
     def test_drift_and_slice_csv(self):
         status,headers,body=self.get("/api/drift",dict(self.args,lat=0,lon=0,hours=1))

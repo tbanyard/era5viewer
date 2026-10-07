@@ -1,4 +1,4 @@
-# era5viewer
+# era5viewer v1.2
 
 A local ERA5 viewer combining the map controls from
 SkySightStyleAtmosphereViewer with point inspection, local map assets and the
@@ -17,24 +17,35 @@ Then run:
     cd /data1/tim/era5viewer
     bash start.sh
 
-The first run creates a local .venv and installs NumPy and netCDF4. It needs
+Without an active Python environment, the first run creates a **per-user**
+environment at `~/.cache/era5viewer/venv` and installs NumPy and netCDF4 there. It needs
 Python 3.10 or newer, Python's venv support and internet access for that initial
-installation. Later runs use the installed environment. Stop with Ctrl+C.
+installation. Later runs use that environment. The project directory can be
+read-only; each user owns their installation. Stop with Ctrl+C.
 
-Open **http://127.0.0.1:8766/** in your browser.
+Open **http://127.0.0.1:8767/** in your browser.
 
 If you already use an activated Conda environment, you can run directly:
 
     conda install numpy netcdf4
     python server.py
 
-That installs into the active Conda environment. `start.sh` instead creates a
-project-local `.venv`; it does not install requirements into Conda base. The
-Conda route also avoids `.venv` symlink problems on filesystems that do not
-support them.
+That installs into the active Conda environment. `start.sh` now uses an explicitly
+activated Conda/venv environment when its dependencies are installed. It checks
+for missing dependencies and prints an installation command; it never installs
+into an activated environment silently. Without an activated environment, it
+uses the per-user environment described above. Set `ERA5VIEWER_VENV` to choose
+a different location on a local filesystem. Using an existing Conda environment
+also bypasses venv creation on filesystems that do not support its symlinks.
+
+On a shared server, a user-owned Conda environment is another option:
+
+    conda create --prefix "$HOME/.conda/envs/era5viewer" python=3.12 numpy netcdf4
+    conda activate "$HOME/.conda/envs/era5viewer"
+    bash /data1/tim/era5viewer/start.sh --config "$HOME/my-era5.json"
 
 You can also double-click index.html while the reader is running. Its connection
-dialog defaults to http://127.0.0.1:8766. Browsers that restrict local-file
+dialog defaults to http://127.0.0.1:8767. Browsers that restrict local-file
 network requests can use the localhost URL above.
 
 ## Your data
@@ -44,7 +55,7 @@ config.json starts with:
     {
       "data_root": "/data3/ERA5",
       "host": "127.0.0.1",
-      "port": 8766,
+      "port": 8767,
       "cache_mb": 256
     }
 
@@ -69,12 +80,54 @@ reduced Gaussian grids, GRIB and native pressure-level files are outside this
 initial version. Your header describes the supported model-level format;
 pressure views are derived from that format.
 
-Change the root in config.json, or override settings:
+Leave the shared `config.json` as the administrator's default. Use a personal
+file as described below, or override settings for your own reader:
 
-    bash start.sh --data-root /other/ERA5 --port 8766 --cache-mb 512
+    bash start.sh --data-root /other/ERA5 --port 8767 --cache-mb 512
 
-After adding files, click the rescan button in the header. Restart the reader
-after changing config.json.
+After adding data files, click the rescan button in the header. Restart your
+reader after changing your personal configuration or updating the viewer.
+
+## Personal configurations on a shared server
+
+Click **Local archive → Personal configuration** to edit the data directory,
+reader port, cache size and bind address. **Download JSON** saves a personal
+file, such as `my-era5.json`. **Load JSON** opens an existing file in the editor.
+The panel also shows the configuration and effective settings of the connected
+reader. Your shared `config.json` is never edited by this panel or the reader.
+
+When using a remote server, download the JSON on your computer and copy it to
+your own directory **on the server**. Choose that server path in the editor to
+get the corresponding startup command, for example:
+
+    bash /data1/tim/era5viewer/start.sh --config /home/alice/my-era5.json
+
+The filename and directory are your choice. `~` in a configuration path is
+expanded for the account running the reader. A relative configuration path is
+resolved from the directory where you invoked `start.sh`, even when the project
+is elsewhere. Use absolute paths for `data_root` to keep its meaning clear.
+You can alternatively set `ERA5VIEWER_CONFIG` to your personal JSON path.
+Command-line settings such as `--port` override values from the chosen file.
+
+Each user should run a reader **under their own server account** on a different
+free server port. For example, Alice can choose 8768 and Bob 8769. Their data
+roots, caches and configurations are independent, even though they use the same
+read-only project and may read the same ERA5 archive.
+
+For Alice's reader, run this on her computer and leave it open:
+
+    ssh -N -L 8768:127.0.0.1:8768 alice@data-machine
+
+Then open `http://127.0.0.1:8768/`, or set that address in the HTML viewer. The
+personal-configuration panel generates startup and tunnel commands for the
+chosen port. Change `data-machine` to your server's actual hostname. If that
+local port is busy, use another local forwarding port, for example
+`ssh -N -L 9000:127.0.0.1:8768 alice@data-machine`, and open
+`http://127.0.0.1:9000/`.
+
+The configuration editor prepares files and commands; it does not change a
+running reader. Start or restart your personal reader with the selected file,
+then connect to it. No project-directory write permission is needed to run it.
 
 ## Use the viewer
 
@@ -97,6 +150,9 @@ after changing config.json.
   above ground as the fallback. An explicitly selected reference is remembered
   in the browser and applies to both the map and profiles.
 - **Point:** click for T, U, V, wind speed, wind direction and a vertical profile.
+  The **NSEW** button beside the coordinates switches signed values to compass
+  directions, for example `3.383°N, 64.674°W`. This preference is remembered
+  and also applies to hover readouts and the profile PNG's coordinates.
   Height and pressure share the profile's two y-axes. Choose the primary axis;
   only it draws horizontal grid lines. Height ticks normally use 10 km over
   the full column; zoomed views and field axes use rounded 1/2/2.5/5 intervals.
@@ -110,10 +166,37 @@ after changing config.json.
   scales use the 2–98% range with rounded bounds. The visible-window scale
   follows pan/zoom without reading a new NetCDF slice. Fixed limits are best
   when comparing different times. Missing/out-of-column regions remain blank.
+  **Coastlines** adds a thin outline above the field, using bundled Natural
+  Earth 1:50m geometry. It works without street tiles or an internet connection,
+  appears in Map PNG, and remembers your preference. These are generalised map
+  outlines, not the ERA5 model's land-sea mask.
 - **PNG:** Map PNG exports the current viewport with field, contours, arrows,
   tracks, labels, date/layer and colourbar, excluding the profile and controls.
   Profile PNG exports the current profile axes and zoom. Both work offline;
   loaded basemap tiles are included in the map when available.
+  Both PNG titles start with **ERA5 ·**.
+- **Layer netCDF:** next to Map PNG, download one variable at the displayed time
+  and model/pressure/height layer, plus `lnsp` and available **surface** `z`.
+  This exports the **full source horizontal grid**, not a viewport crop. The
+  original latitude/longitude values and order, time units and field units are
+  preserved. Temperature is in kelvin. Physical float32 values are written
+  without another packing/quantisation step, in NetCDF3 64-bit-offset format.
+  Missing data use an explicit fill value. Wind speed can be exported as a
+  derived field without also including U and V.
+
+  Model slices have a single `level`; interpolated pressure slices have a
+  single `pressure` in hPa; height slices have a single `height` in metres with
+  the AGL/MSL reference recorded. All have one unlimited `time` record. Surface
+  auxiliaries use `(time, latitude, longitude)`. Terrain is read from matching
+  `era5_topo.nc` when it is not in the weather file. If `lnsp` or surface `z` is
+  unavailable, it is omitted and explained in `export_notes`; zeros are never
+  substituted. When only `sp` exists, `lnsp` is calculated from it. If the chosen
+  atmospheric variable itself is named `z`, terrain is named
+  `surface_geopotential` to distinguish the two.
+
+  These files contain one slice, not a full atmospheric column, and are intended
+  for downstream analysis. The current viewer still expects model-level archives
+  for its complete profile and height calculations.
 - **CSV:** export a displayed grid or a point profile. Temperature stays in
   original kelvin in CSV; missing values are blank and units are included.
 - **Trace the wind:** from a selected point, trace horizontal advection on the
@@ -192,21 +275,21 @@ Changing the variable/layer creates different display frames; rescanning clears
 this cache. Caching does not invent intermediate ERA5 timestamps. The ERA5 archive is
 read-only: no preprocessing or derived files are required there.
 
-All JavaScript and Leaflet assets are included. After installing the Python
+All JavaScript, Leaflet and coastline assets are included. After installing the Python
 dependencies, the reader and data viewer work offline. Street tiles use
 OpenStreetMap when available; switch that overlay off when offline. Fields,
-graticules, wind arrows, profiles and export continue to work.
+graticules, coastlines, wind arrows, profiles and exports continue to work.
 
 ## If the data machine is remote
 
 Run the reader on the data machine. From your desktop:
 
-    ssh -N -L 8766:127.0.0.1:8766 user@data-machine
+    ssh -N -L 8767:127.0.0.1:8767 user@data-machine
 
-Open http://127.0.0.1:8766/ on your desktop. The SSH tunnel reaches the remote
+Open http://127.0.0.1:8767/ on your desktop. The SSH tunnel reaches the remote
 reader while keeping its default loopback binding. Run the SSH command in
 a terminal on your desktop and leave it open; the reader address stays
-http://127.0.0.1:8766. The SSH command is not a reader address.
+http://127.0.0.1:8767. The SSH command is not a reader address.
 
 ## Troubleshooting
 
@@ -216,10 +299,11 @@ rescan. Year directories are scanned recursively.
 **Reader offline:** run bash start.sh and check the connection address. A browser
 needs the reader to access NetCDF on /data3/ERA5.
 
-**Port busy:** run bash start.sh --port 8767, then use that URL or change the
+**Port busy:** run bash start.sh --port 8768, then use that URL or change the
 connection dialog.
 
-**Missing Python package:** run .venv/bin/python -m pip install -r requirements.txt.
+**Missing Python package:** install from `requirements.txt` in your chosen
+environment, or rerun `start.sh` for the per-user environment.
 If python3 -m venv is unavailable, install your distribution's Python venv support.
 
 **Blank layer:** try another level. The chosen surface may lie outside the full
@@ -237,7 +321,7 @@ last time needs another file.
 
 Run from the project directory:
 
-    .venv/bin/python -m unittest discover -s tests -v
+    python -m unittest discover -s tests -v
 
 Optional browser checks need Node only for testing:
 

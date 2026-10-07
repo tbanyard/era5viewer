@@ -23,7 +23,7 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
    url:base+"/",runScripts:"outside-only",pretendToBeVisual:true,virtualConsole:vc
   });
   const w=dom.window,$=id=>w.document.getElementById(id);
-  const requests=[],downloads=[];
+  const requests=[],downloads=[],blobs=[],labels=[];
   w.fetch=(u,options={})=>{
    requests.push(String(u));
    const c=new AbortController();
@@ -31,7 +31,7 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
    return fetch(u,Object.assign({},options,{signal:c.signal}));
   };
   w.Image=class extends Image { set src(value){super.src=typeof value==="string"&&value.startsWith("data:image/svg+xml;base64,")?Buffer.from(value.split(",")[1],"base64"):value;} get src(){return super.src;} };
-  w.URL.createObjectURL=()=>"blob:test-export";w.URL.revokeObjectURL=()=>{};
+  w.URL.createObjectURL=blob=>{blobs.push(blob);return "blob:test-export";};w.URL.revokeObjectURL=()=>{};
   w.HTMLAnchorElement.prototype.click=function(){downloads.push(this.download);};
   w.HTMLCanvasElement.prototype.toBlob=function(callback,type){callback(new w.Blob([this._native.toBuffer("image/png")],{type}));};
   w.ResizeObserver=class{observe(){}disconnect(){}};
@@ -52,6 +52,7 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
     const native=this._native.getContext("2d");
     this._context=new Proxy(native,{get(target,key){
      if(key==="drawImage")return(image,...args)=>target.drawImage(image._native||image,...args);
+     if(key==="fillText")return(...args)=>{labels.push(String(args[0]));return target.fillText(...args);};
      const value=target[key];return typeof value==="function"?value.bind(target):value;
     },set(target,key,value){target[key]=value;return true;}});
    }
@@ -60,16 +61,31 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   w.eval(fs.readFileSync(path.join(root,"web/vendor/leaflet/leaflet.js"),"utf8"));
   w.SVGElement.prototype.getBoundingClientRect=()=>({width:300,height:260*300/360,left:0,top:0});
   w.eval(fs.readFileSync(path.join(root,"web/plots.js"),"utf8"));
+  w.eval(fs.readFileSync(path.join(root,"web/coastlines.js"),"utf8"));
   w.eval(fs.readFileSync(path.join(root,"web/app.js"),"utf8"));
   const state=w.era5viewer.state,change=(id,value)=>{$(id).value=value;$(id).dispatchEvent(new w.Event("change",{bubbles:true}));};
   await until(()=>state.grid?.stats.valid>0,"initial grid");
   assert.equal($("time-label").textContent,"12:00 UTC");assert.equal(state.times.length,8);
   assert.equal($("date").value,"2016-09-26");
   assert.equal(state.reference,"msl");assert.equal($("height-reference").options[1].disabled,false);
+  assert.equal($("app-version").textContent,"v1.2");
+  assert.equal(w.document.querySelector('[data-field="wind_speed"]').textContent,"Wind speed");
+  assert.ok(w.ERA5Coastlines.lines.length>1000);
+  assert.equal($("layer-netcdf").classList.contains("disabled"),false);
+  const netcdf=await fetch($("layer-netcdf").href);assert.equal(netcdf.status,200);
+  assert.equal(netcdf.headers.get("content-type"),"application/x-netcdf");
+  assert.equal(Buffer.from(await netcdf.arrayBuffer()).subarray(0,4).toString("binary"),"CDF\x02");
   assert.match($("data-badge").textContent,/7.5°/);
   assert.match($("notice-text").textContent,/Height uses dry air approximation/);$("notice-close").click();assert.equal($("notice").hidden,true);
   const raw=w.era5viewer.sample(state.grid,"values",51,-1);assert.ok(Number.isFinite(raw));
   $("basemap-toggle").click();
+  w.era5viewer.captureMap(false);
+  const beforeCoasts=Buffer.from($("overlay-canvas")._native.toBuffer("image/png"));
+  $("coastline-toggle").click();w.era5viewer.captureMap(false);
+  const withCoasts=Buffer.from($("overlay-canvas")._native.toBuffer("image/png"));
+  assert.notDeepEqual(withCoasts,beforeCoasts,"coastlines must change the actual overlay pixels");
+  fs.writeFileSync(path.join(out,"coastlines-map.png"),w.era5viewer.captureMap(false)._native.toBuffer("image/png"));
+  assert.match(w.era5viewer.map.attributionControl.getContainer().textContent,/Natural Earth/);
   w.document.querySelector('[data-field="u"]').click();
   await until(()=>state.grid?.variable.id==="u","U field");
   w.document.querySelector('[data-mode="pressure"]').click();
@@ -86,6 +102,11 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   await until(()=>state.grid?.mode==="height"&&state.grid.variable.id==="t","5 km temperature");
   w.era5viewer.map.fire("click",{latlng:w.L.latLng(51,-1)});
   await until(()=>state.profile?.profiles.t.length===137,"point profile");
+  assert.equal($("point-coordinates").textContent,"51.000°, -1.000°");
+  $("coordinate-toggle").click();assert.equal($("point-coordinates").textContent,"51.000°N, 1.000°W");
+  assert.equal(w.localStorage.getItem("era5viewer.compassCoordinates"),"1");
+  assert.equal(w.era5viewer.coordinateLabel(-3.383,-64.674),"3.383°S, 64.674°W");
+  $("coordinate-toggle").click();assert.equal($("point-coordinates").textContent,"51.000°, -1.000°");
   assert.equal(w.document.querySelectorAll("#point-metrics .metric").length,4);
   assert.equal(w.document.querySelectorAll("#profile-chart svg").length,1);
   assert.ok([...w.document.querySelectorAll(".primary-tick")].every(el=>Number(el.textContent)%10===0));
@@ -144,9 +165,32 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   $("drift-hours").value=30;$("drift-run").click();await until(()=>state.tracks.length===2,"cross-day drift");
   assert.equal(state.drift.source_files.length,2);
   $("drift-clear-all").click();assert.equal(state.tracks.length,0);assert.equal(state.drift,null);
-  $("connection-open").click();assert.equal($("connection-dialog").open,true);$("connection-close").click();
+  assert.ok(labels.some(text=>text.startsWith("ERA5 · Temperature ·")));
+  assert.ok(labels.some(text=>text.startsWith("ERA5 · Temperature profile")));
+  $("connection-open").click();assert.equal($("connection-dialog").open,true);
+  assert.match($("active-config").textContent,/user.*port/);
+  assert.equal(Number($("config-port").value),state.configuration.settings.port);
+  $("personal-config").open=true;
+  const edit=(id,value)=>{$(id).value=value;$(id).dispatchEvent(new w.Event("input"));};
+  edit("config-path","~/my archive.json");edit("config-port",8788);edit("config-cache",128);edit("config-root","/users/me/ERA5");
+  const draft=JSON.parse($("config-json").textContent);
+  assert.deepEqual(draft,{data_root:"/users/me/ERA5",host:"127.0.0.1",port:8788,cache_mb:128});
+  assert.match($("config-command").textContent,/--config '~\/my archive.json'/);
+  assert.match($("config-tunnel").textContent,/-L 8788:127.0.0.1:8788/);
+  $("config-download").click();assert.equal(downloads.at(-1),"my archive.json");
+  assert.equal(blobs.at(-1).type,"application/json");
+  const blobText=blob=>new Promise((resolve,reject)=>{const r=new w.FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsText(blob);});
+  assert.deepEqual(JSON.parse(await blobText(blobs.at(-1))),draft);
+  assert.equal((await (await fetch(base+"/api/config")).json()).settings.data_root,state.catalog.root,"editing personal JSON must not change the running reader");
+  const imported={data_root:"/personal/archive",host:"127.0.0.1",port:8899,cache_mb:64};
+  Object.defineProperty($("config-file"),"files",{configurable:true,value:[new w.File([JSON.stringify(imported)],"chosen.json",{type:"application/json"})]});
+  $("config-file").dispatchEvent(new w.Event("change"));
+  await until(()=>$("config-root").value==="/personal/archive","personal JSON import");
+  assert.equal($("config-path").value,"~/chosen.json");
+  edit("config-port",-1);assert.equal($("config-download").disabled,true);assert.match($("config-status").textContent,/port/);
+  edit("config-port",8899);$("connection-close").click();
   assert.deepEqual(errors,[]);
-  console.log("Frontend DOM and canvas checks: PASS (topography/MSL, resolution, warnings, fields/layers, profile axes/zoom, contours, visible/fixed ranges, PNG/CSV, persistent cross-day tracks, bounded animation cache)");
+  console.log("Frontend DOM and canvas checks: PASS (v1.2 NetCDF, offline coastlines, compass coordinates, ERA5 PNG titles, personal JSON import/download, read-only configuration, plus all v1.1 checks)");
  }finally{
   if(dom){dom.window.era5viewer?.dispose();dom.window.close();}
   if(server)server.kill();fs.rmSync(data,{recursive:true,force:true});

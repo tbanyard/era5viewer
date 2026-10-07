@@ -1,4 +1,4 @@
-# Verification
+# Verification · v1.2
 
 Validated using explicitly synthetic NetCDF fixtures and the two project
 archives supplied in this conversation. No access to the user's actual
@@ -6,7 +6,8 @@ archives supplied in this conversation. No access to the user's actual
 
 ## Passed
 
-- 25 Python tests covering science, NetCDF readers and the HTTP API.
+- 38 Python tests covering science, NetCDF readers, exports, configurations and
+  the HTTP API.
 - Packed int16 T/U/V/lnsp with the exact scale factors, offsets, fill values,
   Gregorian calendar and time-units string in the provided header.
 - NetCDF3 and NetCDF4/HDF5.
@@ -45,6 +46,36 @@ archives supplied in this conversation. No access to the user's actual
 - Field canvas output was generated and visually inspected.
 - JavaScript syntax, Python compilation and shell launcher syntax.
 
+## v1.2 checks
+
+- Layer downloads are readable NetCDF3 64-bit-offset files with one unlimited
+  time record. Model, pressure and height coordinates carry the appropriate
+  values and units; pressure/height interpolation and AGL/MSL are recorded.
+- Exported model values compared directly against the independently unpacked
+  source file, including its missing-value mask, reversed model-level ordering,
+  reordered field dimensions and descending/wrapped horizontal coordinates.
+- Original time units and latitude/longitude order retained, including a
+  repeated cyclic longitude endpoint. Temperature remains in kelvin.
+- Static, packed, spatially varying terrain correctly exported as surface z.
+  Missing auxiliaries omitted with an explanation; lnsp derived from sp when
+  needed. Derived wind speed does not add unwanted U/V variables to the file.
+- Both the netCDF4 in-memory writer and optional SciPy NetCDF3 writer verified.
+- Two reader processes launched simultaneously with different personal JSON
+  files, archives, cache sizes and ports. Relative config paths resolved from
+  the caller's directory. Shared config bytes remained unchanged.
+- Read-only personal files, environment-selected configuration, command-line
+  overrides, invalid settings, and effective configuration API checked.
+- Frontend NetCDF endpoint exercised and its binary download checked.
+- Bundled coastlines evaluated without external requests; actual overlay pixels
+  changed when enabled. Coastlines and the ERA5 title were visually inspected
+  in generated Map PNG. Map and profile title text verified during rendering.
+- Compass formatting, signs, longitude wrapping, accessible toggle state and
+  persisted preference checked.
+- Personal JSON import and download exercised; actual downloaded JSON content
+  and MIME type checked. Startup/tunnel commands, port validation and isolation
+  from the active reader configuration checked.
+- Version v1.2 and Wind speed quick-field label verified.
+
 ## Full-size fixture
 
 A packed NetCDF3 file was generated with **8 times × 137 levels × 121 latitudes
@@ -68,8 +99,8 @@ or transfers, and will depend on the user's storage and machine.
 ## Remaining verification on the user's machine
 
 Full Chromium interaction, mobile visual layout and direct file:// browser
-operation could not be executed here: the remote browser service timed out
-and the local browser binary could not start in this environment.
+operation could not be executed here: a browser binary was unavailable and its
+download did not complete successfully in this environment.
 The optional scripts/browser-check.cjs covers those cases for a normal
 browser-capable environment. DOM tests and the HTTP CORS checks passed.
 

@@ -19,4 +19,12 @@ The optional online basemap uses OpenStreetMap and displays its attribution.
 Consult the [OpenStreetMap tile usage policy](https://operations.osmfoundation.org/policies/tiles/)
 before running a public or heavily used deployment.
 
+Natural Earth 1:50m coastline geometry is bundled in `web/coastlines.js`, rounded
+to four decimal places and split at the longitude seam. Natural Earth raster
+and vector data are in the public domain. Source:
+[1:50m physical vectors](https://www.naturalearthdata.com/downloads/50m-physical-vectors/).
+[Terms of use](https://www.naturalearthdata.com/about/terms-of-use/).
+`scripts/build_coastlines.py` reproduces the asset from the official coastline ZIP.
+The map shows attribution when enabled, and Map PNG includes the source label.
+
 Python and optional testing dependencies retain their own licenses.
