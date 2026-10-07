@@ -97,11 +97,38 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory",type=Path)
     parser.add_argument("--full-grid",action="store_true",help="Use the user's 121×240 horizontal grid.")
+    parser.add_argument("--topography",action="store_true",help="Also create explicitly synthetic static surface geopotential.")
     args=parser.parse_args()
     grid={"lat":np.linspace(90,-90,121),"lon":np.arange(0,360,1.5)} if args.full_grid else {}
     make_file(args.directory/"2016"/"era5_2016d269.nc",missing=True,**grid)
     make_file(args.directory/"2016"/"era5_2016d270.nc",date="2016-09-26",**grid)
+    if args.topography:
+        make_topography(args.directory/"era5_topo.nc",**grid)
     print(f"Explicitly synthetic test files written to {args.directory}")
+
+
+def make_topography(path, lat=None, lon=None, heights=1000, singleton=True, packed=True, units="m**2 s**-2"):
+    """Explicitly synthetic terrain, with optional packed data and singleton time."""
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    lat=np.asarray(lat if lat is not None else np.linspace(90,-90,25),dtype="float32")
+    lon=np.asarray(lon if lon is not None else np.arange(0,360,7.5),dtype="float32")
+    with Dataset(str(path),"w",**({"format":"NETCDF3_64BIT_OFFSET"} if HAS_NETCDF4 else {"version":2})) as nc:
+        nc.createDimension("lat",len(lat));nc.createDimension("lon",len(lon))
+        for name,values in (("lat",lat),("lon",lon)):
+            nc.createVariable(name,"f",(name,))[:]=values
+        dims=("lon","lat")
+        if singleton:
+            nc.createDimension("time",1);dims=("time",*dims)
+        var=nc.createVariable("z","i" if packed else "f",dims)
+        var.units=units
+        values=np.broadcast_to(np.asarray(heights)*G,(len(lat),len(lon))).T
+        if packed:
+            var.scale_factor=.01;var.add_offset=5.
+            if HAS_NETCDF4:var.set_auto_maskandscale(False)
+            values=np.rint((values-5)/.01).astype("int32")
+        var[:]=values[None] if singleton else values
+        nc.title="SYNTHETIC ERA5VIEWER TEST TOPOGRAPHY - not ERA5 data"
+    return path
 
 
 if __name__=="__main__":

@@ -3,7 +3,7 @@
 const assert=require("node:assert/strict"),fs=require("node:fs"),path=require("node:path");
 const {spawn,spawnSync}=require("node:child_process");
 const {JSDOM,VirtualConsole}=require("jsdom");
-const {createCanvas}=require("@napi-rs/canvas");
+const {createCanvas,Image}=require("@napi-rs/canvas");
 const root=path.resolve(__dirname,".."),out=path.join(root,"test-results");
 const python=process.env.PYTHON||"python3",pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(check,label){for(let i=0;i<300;i++){if(check())return;await pause(30);}throw new Error("Timed out: "+label);}
@@ -12,7 +12,7 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
  fs.mkdirSync(out,{recursive:true});const data=fs.mkdtempSync(path.join(out,"dom-weather-"));
  let server,dom;
  try{
-  const fixture=spawnSync(python,[path.join(root,"scripts/make_test_data.py"),data],{cwd:root,encoding:"utf8"});
+  const fixture=spawnSync(python,[path.join(root,"scripts/make_test_data.py"),data,"--topography"],{cwd:root,encoding:"utf8"});
   assert.equal(fixture.status,0,fixture.stderr);
   server=spawn(python,["server.py","--data-root",data,"--port","0"],{cwd:root,env:process.env,stdio:["ignore","pipe","pipe"]});
   let log="";server.stdout.on("data",b=>log+=b);server.stderr.on("data",b=>log+=b);
@@ -23,11 +23,17 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
    url:base+"/",runScripts:"outside-only",pretendToBeVisual:true,virtualConsole:vc
   });
   const w=dom.window,$=id=>w.document.getElementById(id);
+  const requests=[],downloads=[];
   w.fetch=(u,options={})=>{
+   requests.push(String(u));
    const c=new AbortController();
    if(options.signal){if(options.signal.aborted)c.abort();else options.signal.addEventListener("abort",()=>c.abort(),{once:true});}
    return fetch(u,Object.assign({},options,{signal:c.signal}));
   };
+  w.Image=class extends Image { set src(value){super.src=typeof value==="string"&&value.startsWith("data:image/svg+xml;base64,")?Buffer.from(value.split(",")[1],"base64"):value;} get src(){return super.src;} };
+  w.URL.createObjectURL=()=>"blob:test-export";w.URL.revokeObjectURL=()=>{};
+  w.HTMLAnchorElement.prototype.click=function(){downloads.push(this.download);};
+  w.HTMLCanvasElement.prototype.toBlob=function(callback,type){callback(new w.Blob([this._native.toBuffer("image/png")],{type}));};
   w.ResizeObserver=class{observe(){}disconnect(){}};
   w.SVGSVGElement.prototype.createSVGRect=()=>({});
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
@@ -52,11 +58,16 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
    return this._context;
   };
   w.eval(fs.readFileSync(path.join(root,"web/vendor/leaflet/leaflet.js"),"utf8"));
+  w.SVGElement.prototype.getBoundingClientRect=()=>({width:300,height:260*300/360,left:0,top:0});
+  w.eval(fs.readFileSync(path.join(root,"web/plots.js"),"utf8"));
   w.eval(fs.readFileSync(path.join(root,"web/app.js"),"utf8"));
   const state=w.era5viewer.state,change=(id,value)=>{$(id).value=value;$(id).dispatchEvent(new w.Event("change",{bubbles:true}));};
   await until(()=>state.grid?.stats.valid>0,"initial grid");
   assert.equal($("time-label").textContent,"12:00 UTC");assert.equal(state.times.length,8);
   assert.equal($("date").value,"2016-09-26");
+  assert.equal(state.reference,"msl");assert.equal($("height-reference").options[1].disabled,false);
+  assert.match($("data-badge").textContent,/7.5°/);
+  assert.match($("notice-text").textContent,/Height uses dry air approximation/);$("notice-close").click();assert.equal($("notice").hidden,true);
   const raw=w.era5viewer.sample(state.grid,"values",51,-1);assert.ok(Number.isFinite(raw));
   $("basemap-toggle").click();
   w.document.querySelector('[data-field="u"]').click();
@@ -77,6 +88,31 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   await until(()=>state.profile?.profiles.t.length===137,"point profile");
   assert.equal(w.document.querySelectorAll("#point-metrics .metric").length,4);
   assert.equal(w.document.querySelectorAll("#profile-chart svg").length,1);
+  assert.ok([...w.document.querySelectorAll(".primary-tick")].every(el=>Number(el.textContent)%10===0));
+  assert.ok(w.document.querySelectorAll(".secondary-tick").length>3);
+  assert.equal(state.profilePlot.axis,"height");
+  change("profile-axis","pressure");assert.equal(state.profilePlot.axis,"pressure");
+  assert.ok(w.document.querySelectorAll(".primary-tick").length>4);
+  assert.ok(w.document.querySelectorAll(".secondary-tick").length>3);
+  change("profile-axis","height");
+  let svg=w.document.querySelector("#profile-chart svg");
+  svg.dispatchEvent(new w.WheelEvent("wheel",{clientX:150,clientY:110,deltaY:-100,cancelable:true}));
+  assert.ok(state.profileView);assert.ok(state.profilePlot.y[1]-state.profilePlot.y[0]<state.profilePlot.fullY[1]-state.profilePlot.fullY[0]);
+  $("profile-reset").click();assert.equal(state.profileView,null);
+  svg=w.document.querySelector("#profile-chart svg");
+  svg.onpointerdown({button:0,clientX:100,clientY:60,pointerId:1,preventDefault(){}});
+  svg.onpointermove({clientX:200,clientY:160});svg.onpointerup({clientX:200,clientY:160});
+  assert.ok(state.profileView);$("profile-reset").click();
+  const fullScale=state.scale.slice();
+  change("range-mode","view");w.era5viewer.map.setView([51,-1],5);await pause(120);
+  assert.ok(state.scale[1]>state.scale[0]);const adaptive=state.scale.slice();assert.ok(adaptive[1]-adaptive[0]<fullScale[1]-fullScale[0],"window scaling should reveal local contrast");
+  $("range-min").value=-50;change("range-max",0);assert.equal($("range-mode").value,"fixed");
+  w.era5viewer.map.setView([30,30],3);await pause(80);assert.deepEqual([...state.scale],[-50,0]);
+  change("range-mode","auto");$("contour-toggle").click();await pause(100);
+  assert.ok(state.contourCache?.lines.some(l=>l.paths.length));
+  const plane=w.ERA5Plots.contours(100,100,[50],(x,y)=>x+y,10)[0].paths;
+  assert.ok(plane.length>0);assert.ok(plane.flat().every(([x,y])=>Math.abs(x+y-50)<1e-5));
+  w.era5viewer.map.setView([51,-1],5);await pause(80);
   change("temperature-unit","K");assert.equal($("legend-unit").textContent,"K");
   change("temperature-unit","C");assert.equal($("legend-unit").textContent,"°C");
   $("drift-run").click();await until(()=>state.drift?.path.length>2,"wind drift");
@@ -87,14 +123,30 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   await pause(80);
   fs.writeFileSync(path.join(out,"field-render.png"),$("field-canvas")._native.toBuffer("image/png"));
   fs.writeFileSync(path.join(out,"wind-grid-render.png"),$("overlay-canvas")._native.toBuffer("image/png"));
+  const mapPNG=w.era5viewer.captureMap(false);fs.writeFileSync(path.join(out,"map-export.png"),mapPNG._native.toBuffer("image/png"));
+  fs.writeFileSync(path.join(out,"profile-export.svg"),state.profilePlot.svg);
+  const profilePNG=await w.era5viewer.captureProfile();fs.writeFileSync(path.join(out,"profile-export.png"),profilePNG._native.toBuffer("image/png"));
+  $("map-png").click();$("profile-png").click();await until(()=>downloads.includes("era5-map.png")&&downloads.includes("era5-profile.png"),"PNG download buttons");
+  w.era5viewer.map.fire("click",{latlng:w.L.latLng(52,0)});
+  await until(()=>state.profile?.latitude===52,"new point");assert.equal(state.tracks.length,1);
+  $("drift-run").click();await until(()=>state.tracks.length===2,"second retained track");
+  $("drift-clear").click();assert.equal(state.tracks.length,1);
   $("next-time").click();await until(()=>state.grid?.record.datetime.includes("T15:00"),"next real time");
-  assert.equal(state.drift,null);assert.equal($("drift-export").hidden,true);
+  assert.equal(state.tracks.length,1);assert.equal($("drift-export").hidden,false);
   await until(()=>state.profile?.record.datetime.includes("T15:00"),"profile refresh");
   $("play").click();await until(()=>state.grid?.record.datetime.includes("T18:00"),"animation");$("play").click();assert.equal(state.playing,false);
+  await until(()=>state.frameCache.items.size>=8,"prefetched animation frames");
+  const before=requests.filter(u=>u.includes("/api/slice?")).length;
+  await w.era5viewer.changeTime(4);await w.era5viewer.changeTime(5);
+  assert.equal(requests.filter(u=>u.includes("/api/slice?")).length,before,"cached time changes should not re-read slices");
+  assert.ok(state.frameCache.bytes<=state.frameCache.limit);
   $("prev-day").click();await until(()=>state.grid?.record.datetime.startsWith("2016-09-25"),"previous real day");
+  $("drift-hours").value=30;$("drift-run").click();await until(()=>state.tracks.length===2,"cross-day drift");
+  assert.equal(state.drift.source_files.length,2);
+  $("drift-clear-all").click();assert.equal(state.tracks.length,0);assert.equal(state.drift,null);
   $("connection-open").click();assert.equal($("connection-dialog").open,true);$("connection-close").click();
   assert.deepEqual(errors,[]);
-  console.log("Frontend DOM and canvas checks: PASS (real reader data, fields, pressure/model/height, slider races, point/profile, units, drift, CSV, time/date, animation)");
+  console.log("Frontend DOM and canvas checks: PASS (topography/MSL, resolution, warnings, fields/layers, profile axes/zoom, contours, visible/fixed ranges, PNG/CSV, persistent cross-day tracks, bounded animation cache)");
  }finally{
   if(dom){dom.window.era5viewer?.dispose();dom.window.close();}
   if(server)server.kill();fs.rmSync(data,{recursive:true,force:true});

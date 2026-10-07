@@ -49,7 +49,7 @@ def parameters(query):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "era5viewer/1.0"
+    server_version = "era5viewer/1.1"
 
     def __init__(self, *args, archive, **kwargs):
         self.archive = archive
@@ -111,10 +111,9 @@ class Handler(BaseHTTPRequestHandler):
                     except (KeyError, ValueError) as exc:
                         raise DataError("Supply numeric lat and lon.") from exc
                 if route == "/api/drift":
-                    with self.archive.lock:
-                        args.pop("variable")
-                        result = trace(self.archive, **args, lat=lat, lon=lon,
-                                       hours=float(query.get("hours", ["1"])[0]))
+                    args.pop("variable")
+                    result = trace(self.archive, **args, lat=lat, lon=lon,
+                                   hours=float(query.get("hours", ["1"])[0]))
                     return self.respond(result)
                 if route.endswith("profile"):
                     result = self.archive.profile(**args, lat=lat, lon=lon)
@@ -174,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv=None):
-    defaults = {"data_root": "/data3/ERA5", "host": "127.0.0.1", "port": 8765, "cache_mb": 256}
+    defaults = {"data_root": "/data3/ERA5", "host": "127.0.0.1", "port": 8766, "cache_mb": 256}
     config = PROJECT/"config.json"
     if config.exists():
         defaults.update(json.loads(config.read_text()))
@@ -189,7 +188,7 @@ def main(argv=None):
     try:
         server = ThreadingHTTPServer((args.host, args.port), handler)
     except OSError as exc:
-        print(f"Cannot start era5viewer: {exc}. Try --port 8766.", file=sys.stderr)
+        print(f"Cannot start era5viewer: {exc}. Try --port 8767.", file=sys.stderr)
         return 1
     server.daemon_threads = True
     print(f"\nera5viewer {__version__}  •  {archive.catalog()['engine']}", flush=True)

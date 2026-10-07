@@ -87,6 +87,12 @@ def iso(dt):
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def grid_spacing(axis):
+    steps = np.diff(axis)
+    step = float(np.median(steps))
+    return step, bool(np.allclose(steps, step, rtol=1e-4, atol=1e-5))
+
+
 class ByteCache:
     def __init__(self, limit_mb=256):
         self.limit = max(16, int(limit_mb)) * 1024 * 1024
@@ -120,17 +126,29 @@ class Archive:
         self.files = {}
         self.dates = {}
         self.messages = []
+        self.topography = None
+        self.topography_error = None
         self.scan()
 
     def scan(self):
         with self.lock:
             self.files, self.dates, self.metadata, self.messages = {}, {}, {}, []
             self.cache = ByteCache(self.cache.limit // 1024**2)
+            self.topography, self.topography_error = None, None
             if not self.root.is_dir():
                 self.messages.append(f"Data directory does not exist: {self.root}")
                 return self.catalog()
+            topo = self.root / "era5_topo.nc"
+            if topo.is_file():
+                try:
+                    self.topography = self.load_topography(topo)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    self.topography_error = f"era5_topo.nc: {exc}"
+                    self.messages.append(self.topography_error)
             for path in sorted(self.root.rglob("*.nc")):
                 if not path.resolve().is_relative_to(self.root):
+                    continue
+                if path == topo:
                     continue
                 relative = str(path.relative_to(self.root))
                 fid = hashlib.sha256(relative.encode()).hexdigest()[:20]
@@ -159,7 +177,74 @@ class Archive:
         dates = sorted(self.dates)
         return {"root": str(self.root), "dates": dates, "years": sorted({d[:4] for d in dates}),
                 "file_count": len(self.files), "engine": ENGINE, "messages": self.messages[:30],
-                "cache_limit_mb": self.cache.limit // 1024**2}
+                "cache_limit_mb": self.cache.limit // 1024**2,
+                "topography": "era5_topo.nc" if self.topography else None,
+                "topography_error": self.topography_error}
+
+    def load_topography(self, path):
+        """Read one invariant surface geopotential grid, never a weather day."""
+        if not path.resolve().is_relative_to(self.root):
+            raise DataError("Topography must be inside the ERA5 root directory.")
+        with open_nc(path) as nc:
+            coordinates = []
+            for names in (("latitude", "lat"), ("longitude", "lon")):
+                name = next((n for n in names if n in nc.variables), None)
+                if name is None or len(nc.variables[name].dimensions) != 1:
+                    raise DataError("Topography needs one-dimensional latitude and longitude coordinates.")
+                coordinates.append((nc.variables[name].dimensions[0], decode(nc.variables[name]).ravel()))
+            (latdim, lat), (londim, lon) = coordinates
+            if "z" not in nc.variables:
+                raise DataError("Topography needs a surface geopotential variable named z (m² s⁻²).")
+            var = nc.variables["z"]
+            unit = str(attr(var, "units", "m2 s-2")).replace(" ", "").replace("**", "").replace("^", "")
+            if unit not in ("m2s-2", "m2/s2", "m²s⁻²"):
+                raise DataError("z must be geopotential in m² s⁻², rather than elevation in metres.")
+            selection, remaining = [], []
+            for dim, size in zip(var.dimensions, var.shape):
+                if dim in (latdim, londim):
+                    selection.append(slice(None)); remaining.append(dim)
+                elif size == 1:
+                    selection.append(0)
+                else:
+                    raise DataError("Topography must be static; extra time/level dimensions must have size one.")
+            if set(remaining) != {latdim, londim} or len(remaining) != 2:
+                raise DataError("z must have latitude and longitude dimensions.")
+            z = np.transpose(decode(var, tuple(selection)), [remaining.index(latdim), remaining.index(londim)])
+            lon = np.mod(lon, 360)
+            yi, xi = np.argsort(lat), np.argsort(lon)
+            lat, lon, z = lat[yi], lon[xi], z[yi][:, xi].astype("float32")
+            # Accept a duplicate cyclic endpoint, as in a 0..360 degree grid.
+            keep = np.r_[True, np.diff(lon) > 1e-7]
+            lon, z = lon[keep], z[:, keep]
+            if not np.all(np.isfinite(lat)) or not np.all(np.isfinite(lon)) or np.any(np.diff(lat) <= 0):
+                raise DataError("Invalid topography coordinates.")
+            if z.nbytes > self.cache.limit:
+                raise DataError("Topography exceeds the configured cache budget; increase cache_mb.")
+            z.flags.writeable = False
+            return {"lat": lat, "lon": lon, "z": z}
+
+    def topography_indices(self, lat, lon):
+        topo = self.topography
+        if topo is None or len(lat) != len(topo["lat"]) or len(lon) != len(topo["lon"]):
+            return None
+        yi = np.searchsorted(topo["lat"], lat - 1e-5)
+        target = np.mod(lon, 360)
+        xi = np.searchsorted(topo["lon"], target - 1e-5)
+        if (np.any(yi >= len(lat)) or np.any(xi >= len(lon)) or
+                not np.allclose(topo["lat"][yi], lat, atol=1e-5, rtol=0) or
+                not np.allclose(topo["lon"][xi], target, atol=1e-5, rtol=0)):
+            return None
+        return yi, xi
+
+    def surface_geopotential(self, fid, index):
+        with self.lock:
+            meta = self.meta(fid)
+            if meta["surface_z"]:
+                return self.read(fid, index, meta["surface_z"])
+            if meta["topo_indices"] is not None:
+                yi, xi = meta["topo_indices"]
+                return self.topography["z"][yi][:, xi]
+            raise DataError("Sea-level height needs surface z in the weather file or matching era5_topo.nc in the ERA5 root.")
 
     def meta(self, fid):
         with self.lock:
@@ -236,17 +321,21 @@ class Archive:
                 pressure_available = "lnsp" in nc.variables or "sp" in nc.variables
                 # A partial column with the bottom missing cannot be integrated from ground.
                 height_available = pressure_available and "t" in fields and 137 in levels
+                topo_indices = self.topography_indices(lat, lon)
                 warnings = []
                 if height_available and "q" not in fields:
-                    warnings.append("Height uses dry air (q absent): approximate geopotential metres above ground.")
-                if surface_z is None:
-                    warnings.append("Surface geopotential is absent: height above sea level is unavailable.")
+                    warnings.append("Height uses dry air approximation (q absent)")
+                if surface_z is None and topo_indices is None:
+                    warnings.append(self.topography_error or (
+                        "era5_topo.nc grid does not match this weather grid: sea-level height is unavailable."
+                        if self.topography else "Surface geopotential is absent: add era5_topo.nc for sea-level heights."))
                 if not np.array_equal(levels, np.arange(1, 138)):
                     warnings.append("Partial L137 column: height stops at the first missing layer above ground.")
                 meta = {"id": fid, "path": path, "stamp": stamp, "times": times, "levels": levels,
                         "lat": lat, "lon": lon, "yi": yi, "xi": xi, "li": li,
                         "dims": (timedim, leveldim, latdim, londim), "cyclic": bool(cyclic),
                         "fields": fields, "surface_z": surface_z, "warnings": warnings,
+                        "topo_indices": topo_indices, "variables": set(nc.variables),
                         "pressure_available": pressure_available, "height_available": height_available}
             self.metadata[fid] = meta
             return meta
@@ -271,13 +360,17 @@ class Archive:
         meta = self.meta(fid)
         if index < 0 or index >= len(meta["times"]):
             raise DataError("Time index is outside the file.")
+        dy, regular_y = grid_spacing(meta["lat"])
+        dx, regular_x = grid_spacing(meta["lon"])
         return {"file": fid, "index": index, "datetime": iso(meta["times"][index]),
                 "filename": str(meta["path"].relative_to(self.root)),
                 "levels": meta["levels"].tolist(), "fields": list(meta["fields"].values()),
                 "bounds": [float(meta["lat"][0]), float(meta["lon"][0]), float(meta["lat"][-1]), float(meta["lon"][-1])],
                 "shape": [len(meta["lat"]), len(meta["lon"])], "cyclic": meta["cyclic"],
                 "pressure_available": meta["pressure_available"], "height_available": meta["height_available"],
-                "msl_available": meta["height_available"] and meta["surface_z"] is not None,
+                "msl_available": meta["height_available"] and (meta["surface_z"] is not None or meta["topo_indices"] is not None),
+                "surface_z_source": meta["surface_z"] or ("era5_topo.nc" if meta["topo_indices"] is not None else None),
+                "resolution": {"longitude": dx, "latitude": dy, "regular": regular_x and regular_y},
                 "warnings": meta["warnings"]}
 
     def read(self, fid, index, name, layer=None):
@@ -338,7 +431,7 @@ class Archive:
         meta = self.meta(fid)
         if not meta["pressure_available"]:
             raise DataError("Pressure selection needs lnsp or sp in the file.")
-        if "lnsp" in self._variable_names(fid):
+        if "lnsp" in meta["variables"]:
             lnsp = self.read(fid, index, "lnsp")
             if lnsp.ndim == 3 and lnsp.shape[0] == 1:
                 lnsp = lnsp[0]
@@ -372,14 +465,26 @@ class Archive:
         if mode == "height":
             h = self.height(fid, index)
             if reference == "msl":
-                meta = self.meta(fid)
-                if meta["surface_z"] is None:
-                    raise DataError("Height above sea level needs surface geopotential (z) in the file.")
-                return h + self.read(fid, index, meta["surface_z"]) / G
+                return h + self.surface_geopotential(fid, index) / G
             return h
         raise DataError("Choose model, pressure or height.")
 
     def layer(self, fid, index, variable, mode, value, reference="agl"):
+        with self.lock:
+            meta = self.meta(fid)
+            key = (fid, meta["stamp"], index, "@layer", variable, mode, value, reference)
+            cached = self.cache.get(key)
+            if cached is not None:
+                return cached
+            result = self._layer(fid, index, variable, mode, value, reference)
+            # A model plane obtained from a cached cube is a view. Give the
+            # completed-frame cache its own buffer, otherwise a tiny plane can
+            # retain an evicted multi-megabyte cube outside the byte budget.
+            if not result.flags.owndata:
+                result = result.copy()
+            return self.cache.put(key, result)
+
+    def _layer(self, fid, index, variable, mode, value, reference="agl"):
         meta = self.meta(fid)
         if variable not in meta["fields"]:
             raise DataError(f"Variable {variable!r} is unavailable at this time.")
@@ -453,8 +558,8 @@ class Archive:
                 profiles["pressure_hpa"] = sample(self.pressure(fid, index)) / 100
             if meta["height_available"]:
                 profiles["height_agl_m"] = sample(self.height(fid, index))
-                if meta["surface_z"]:
-                    profiles["height_msl_m"] = profiles["height_agl_m"] + float(sample(self.read(fid, index, meta["surface_z"]))) / G
+                if meta["surface_z"] or meta["topo_indices"] is not None:
+                    profiles["height_msl_m"] = profiles["height_agl_m"] + float(sample(self.surface_geopotential(fid, index))) / G
             if "u" in profiles and "v" in profiles:
                 profiles["wind_speed"] = np.hypot(profiles["u"], profiles["v"])
             selected = {}

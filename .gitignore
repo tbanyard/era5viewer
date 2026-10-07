@@ -1,8 +1,4 @@
-.venv/
-__pycache__/
-*.pyc
-test-data/
-test-results/
+
 
 # Local environments, generated files and personal credentials
 .venv/

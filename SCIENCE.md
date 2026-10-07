@@ -2,6 +2,7 @@
 
 Primary references:
 
+- [ERA5 documentation: invariant surface geopotential](https://confluence.ecmwf.int/spaces/CKB/pages/76414402/ERA5+data+documentation)
 - [ECMWF L137 model level definitions](https://confluence.ecmwf.int/display/UDOC/L137+model+level+definitions)
 - [ECMWF ERA5 pressure, geopotential and height calculation](https://confluence.ecmwf.int/spaces/CKB/pages/158636068/ERA5+compute+pressure+and+geopotential+on+model+levels+geopotential+height+and+geometric+height)
 
@@ -52,6 +53,14 @@ static/time-varying surface z is supplied, z/g_0 is added for the optional heigh
 above the sea-level geoid. A model-level z is not mistaken for surface z. The
 sea-level option is disabled when surface geopotential is absent.
 
+The root-level `era5_topo.nc` supplies invariant ERA5 surface z when it is not
+inside a weather file. Coordinates must match after ordering and longitude
+normalisation; no terrain interpolation is guessed. The reader adds z/g_0 to
+the ground-relative column for both maps and profiles. Embedded surface z
+has precedence. The browser defaults to MSL when available and retains an
+explicit user preference. MSL here denotes geopotential height relative to
+the ERA5 sea-level geoid.
+
 Height is **geopotential** height, rather than geometric altitude. An exact
 geometric altitude would require the corresponding conversion and ground
 reference. This distinction grows at high altitude.
@@ -84,7 +93,30 @@ Maps display actual timestamps. Wind drift linearly interpolates U/V between
 neighbouring real times. Midpoint horizontal integration uses a step of at most
 120 seconds on a fixed chosen model/pressure/height surface. Time gaps over six
 hours, missing wind, lost spatial coverage or latitudes beyond 85° stop the
-calculation. Endpoint coverage is also checked.
+calculation. Endpoint coverage is also checked, including the first available record after
+the finish needed for interpolation. Daily files are followed on demand for up
+to 10 days. Integration uses the same selected layer/reference across dates;
+it does not follow a parcel vertically or preserve its starting altitude when
+the selected coordinate is pressure or model level.
 
 No vertical wind or balloon thermodynamics is inferred from T/U/V. The drift
 line is a horizontal diagnostic.
+
+## Plotting
+
+Height is linear and pressure logarithmic in the point profile. The second
+axis maps actual sampled height/pressure pairs, with interpolation in log(p);
+it is not a standard-atmosphere conversion. Only the primary axis supplies
+horizontal grid lines. A missing/omitted vertical layer is not bridged.
+
+Labelled contours use marching squares over screen samples of the same
+bilinearly interpolated field as the colour layer. Saddle cells use the cell
+centre to select connectivity. Missing samples do not generate segments.
+Contours are a visual aid at display resolution, rather than a new data product.
+
+Automatic colour bounds use the 2nd and 98th percentiles, rounded to readable
+limits. Full-layer mode uses represented grid nodes; visible-window mode uses
+represented screen samples. Values beyond the bounds are colour-clipped, not
+removed or altered. Fixed limits retain comparisons between times. PNG exports
+use the displayed units and zoom; CSV keeps original data units and all profile
+levels independently of plot zoom.

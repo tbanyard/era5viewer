@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,7 +8,7 @@ import numpy as np
 from era5viewer.data import Archive, ByteCache, DataError
 from era5viewer.physics import A, B, G, R_D, full_pressure, hydrostatic_height, interpolate_columns, sample_grid
 from era5viewer.trajectory import trace
-from scripts.make_test_data import HAS_NETCDF4, make_file, PACKING
+from scripts.make_test_data import HAS_NETCDF4, make_file, make_topography, PACKING
 
 
 class PhysicsTests(unittest.TestCase):
@@ -151,6 +151,79 @@ class ReaderTests(unittest.TestCase):
         self.assertAlmostEqual(actual_metres,expected_metres,delta=7)
         with self.assertRaises(DataError):
             trace(self.archive,self.fid,2,0,0,"height",5,"agl",hours=1)
+
+    def test_static_topography_packing_coordinate_alignment_and_below_ground_mask(self):
+        # The topo has a different dimension order and a different longitude
+        # convention; a spatially varying height detects an incorrect remap.
+        lat=np.array([-10,0,10]);lon=np.array([-180,-90,0,90])
+        terrain=1000+lat[:,None]*5+np.mod(lon,360)[None,:]
+        make_topography(self.root/"era5_topo.nc",lat=lat,lon=lon,heights=terrain)
+        self.archive.scan()
+        r=self.archive.day("2016-09-25")["times"][1]
+        self.assertTrue(r["msl_available"])
+        self.assertEqual(r["surface_z_source"],"era5_topo.nc")
+        self.assertEqual(self.archive.catalog()["file_count"],1)
+        expected=1000+lat[:,None]*5+np.array([0,90,180,270])[None,:]
+        np.testing.assert_allclose(self.archive.surface_geopotential(self.fid,1)/G,expected,atol=.002)
+        p=self.archive.profile(self.fid,1,0,90,"height",5,"msl")
+        np.testing.assert_allclose(np.array(p["profiles"]["height_msl_m"])-p["profiles"]["height_agl_m"],1090,atol=.002)
+        self.assertTrue(np.isnan(self.archive.layer(self.fid,1,"t","height",.5,"msl")).all())
+        self.assertIn("Height uses dry air approximation (q absent)",r["warnings"])
+
+    def test_topography_grid_and_units_must_match(self):
+        path=self.root/"era5_topo.nc"
+        make_topography(path,lat=[10,0,-10],lon=[0,80,180,270])
+        self.archive.scan()
+        r=self.archive.day("2016-09-25")["times"][0]
+        self.assertFalse(r["msl_available"])
+        self.assertTrue(any("grid does not match" in s for s in r["warnings"]))
+        make_topography(path,lat=[10,0,-10],lon=[0,90,180,270],units="m")
+        self.archive.scan()
+        self.assertFalse(self.archive.day("2016-09-25")["times"][0]["msl_available"])
+        self.assertIn("geopotential",self.archive.catalog()["topography_error"])
+
+    def test_grid_resolution_and_completed_layer_cache(self):
+        self.assertEqual(self.record["resolution"],{"latitude":10,"longitude":90,"regular":True})
+        a=self.archive.layer(self.fid,1,"t","height",5)
+        self.assertIs(a,self.archive.layer(self.fid,1,"t","height",5))
+
+    def test_cached_model_frame_does_not_retain_an_evicted_cube(self):
+        cube=self.archive.read(self.fid,1,"t")
+        plane=self.archive.layer(self.fid,1,"t","model",100)
+        self.assertTrue(plane.flags.owndata)
+        self.assertFalse(np.shares_memory(plane,cube))
+        np.testing.assert_allclose(plane,cube[99])
+
+    def test_drift_uses_next_day_even_when_finish_is_before_midnight(self):
+        make_file(self.path,date="2016-09-25",times=(0,3,6,9,12,15,18,21),constant=True,
+                  lat=[10,0,-10],lon=[0,90,180,270])
+        make_file(self.root/"2016"/"era5_2016d270.nc",date="2016-09-26",constant=True,
+                  lat=[10,0,-10],lon=[0,90,180,270])
+        self.archive.scan()
+        r=self.archive.day("2016-09-25")["times"][-1]
+        result=trace(self.archive,r["file"],r["index"],0,0,"height",5,"agl",hours=2)
+        self.assertEqual(result["path"][-1]["datetime"],"2016-09-25T23:00:00Z")
+        self.assertEqual(len(result["source_files"]),2)
+        # Linear interpolation: 24 m/s at 21, 10 m/s at next day's 00.
+        expected=(24*7200-14/10800*7200**2/2)
+        actual=np.deg2rad(result["path"][-1]["longitude"])*(6371000+5000)
+        self.assertAlmostEqual(actual,expected,delta=15)
+
+    def test_drift_ten_day_limit_and_missing_day_gap(self):
+        for n in range(11):
+            date=(datetime(2016,9,25)+timedelta(days=n)).date().isoformat()
+            make_file(self.root/"2016"/f"era5_2016d{269+n:03d}.nc",date=date,constant=True,
+                      lat=[10,0,-10],lon=[0,90,180,270])
+        self.archive.scan()
+        result=trace(self.archive,self.fid,0,0,0,"height",5,"agl",hours=240)
+        self.assertEqual(result["path"][-1]["datetime"],"2016-10-05T00:00:00Z")
+        self.assertEqual(len(result["source_files"]),11)
+        self.assertLessEqual(self.archive.cache.bytes,self.archive.cache.limit)
+        with self.assertRaisesRegex(DataError,"10 days"):
+            trace(self.archive,self.fid,0,0,0,"height",5,"agl",hours=240.1)
+        (self.root/"2016"/"era5_2016d270.nc").unlink();self.archive.scan()
+        with self.assertRaisesRegex(DataError,"gap longer than six hours"):
+            trace(self.archive,self.fid,4,0,0,"height",5,"agl",hours=40)
 
     @unittest.skipUnless(HAS_NETCDF4,"netCDF4 is not installed in this test runtime")
     def test_hdf5_netcdf4_packing(self):
