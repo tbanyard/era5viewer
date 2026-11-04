@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 from importlib import metadata
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,30 @@ ROOT = Path(__file__).resolve().parent
 NAME = "ERA5ViewerConnect"
 
 
+def verify_macos_crypto():
+    """Fail before packaging if a Rust binding could load Python's older SSL.
+
+    Official wheels link OpenSSL statically. Intel macOS now needs a source
+    build with OPENSSL_STATIC=1 because there is no current Intel wheel.
+    """
+    spec=find_spec("cryptography.hazmat.bindings._rust")
+    if spec is None or not spec.origin:
+        raise RuntimeError("Could not locate the cryptography extension.")
+    linked=subprocess.check_output(["otool","-L",spec.origin],text=True)
+    dependencies=[line.strip().split()[0] for line in linked.splitlines()[1:] if line.strip()]
+    shared=[value for value in dependencies if re.search(r"(?:^|/)lib(?:ssl|crypto)(?:\.|$)",value)]
+    if shared:
+        raise RuntimeError("cryptography still depends on shared OpenSSL: "+", ".join(shared)+
+            ". Reinstall it with OPENSSL_STATIC=1 and --no-cache-dir --no-binary=cryptography before packaging.")
+    print("Verified: cryptography has no shared OpenSSL dependency.")
+
+
 def collect_licenses(destination):
+    openssl_license=os.environ.get("ERA5_OPENSSL_LICENSE")
+    if openssl_license:
+        target=destination / "OpenSSL"
+        target.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(openssl_license,target / "LICENSE.txt")
     for name in ("paramiko", "cryptography", "bcrypt", "PyNaCl", "cffi", "pycparser", "pyinstaller", "altgraph", "packaging", "invoke"):
         try:
             dist = metadata.distribution(name)
@@ -58,6 +82,8 @@ def main():
         values["ssh_host_fingerprints"] = list(dict.fromkeys(pins))
         config.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
     Settings.load()
+    if sys.platform=="darwin":
+        verify_macos_crypto()
     # Importing Tk fails early if the build Python lacks the GUI toolkit.
     import tkinter
     import _tkinter

@@ -65,9 +65,9 @@ Create a separate launcher tag so its build can be reproduced without
 changing the existing v1.4 tag:
 
 ```bash
-git tag -a launcher-v0.1.0 -m "ERA5Viewer Connect 0.1.0"
-git push origin launcher-v0.1.0
-gh workflow run build-era5-launcher.yml --ref launcher-v0.1.0 \
+git tag -a launcher-v0.1.1 -m "ERA5Viewer Connect 0.1.1"
+git push origin launcher-v0.1.1
+gh workflow run build-era5-launcher.yml --ref launcher-v0.1.1 \
   -f 'server_fingerprint=SHA256:REPLACE_WITH_VERIFIED_PUBLIC_FINGERPRINT'
 ```
 
@@ -131,11 +131,11 @@ For a small initial trial, after testing and any required signing, attach
 the native downloads to a separate release:
 
 ```bash
-gh release create launcher-v0.1.0 \
+gh release create launcher-v0.1.1 \
   launcher-artifacts/*/*.zip \
   launcher-artifacts/*/*.tar.gz \
   launcher-artifacts/*/*.sha256 \
-  --verify-tag --title "ERA5Viewer Connect 0.1.0" \
+  --verify-tag --title "ERA5Viewer Connect 0.1.1" \
   --notes-file launcher/RELEASE_NOTES.md --latest=false
 ```
 
@@ -144,6 +144,24 @@ and `--repo` compatibility issue. The viewer's v1.4 release stays Latest.
 Use the GitHub Releases download links in email; executable attachments can
 be blocked by recipients' email or managed-device policies. Send users the
 appropriate OS link and the short `launcher/USER_GUIDE.txt` instructions.
+
+## Intel Mac OpenSSL packaging fix (0.1.1)
+
+Current cryptography releases do not provide Intel Mac wheels. The Intel
+workflow builds cryptography from source with `OPENSSL_STATIC=1` and an explicit
+Homebrew OpenSSL prefix, with pip caching disabled. Before bundling, `build.py`
+uses `otool -L` to reject a cryptography extension that still depends on a
+shared `libssl` or `libcrypto`. This prevents Python's older bundled OpenSSL
+from being used by the Rust extension. The native GUI checks remain enabled.
+No cryptography version downgrade is used.
+
+For a manual Intel Mac build, set the variables before installing:
+
+```bash
+export OPENSSL_DIR="$(brew --prefix openssl@3)"
+export OPENSSL_STATIC=1
+python -m pip install --no-cache-dir --force-reinstall --no-binary=cryptography -r launcher/requirements-build.txt
+```
 
 ## Local development and rebuilding
 
@@ -170,15 +188,19 @@ no credential cache, command-line password, telemetry, or password log is used.
 
 ## Validation in this workspace
 
-18 integration and configuration tests passed in this workspace. The
+21 integration, configuration and linkage-check tests passed in this workspace. The
 integration suite uses a real local Paramiko SSH server and a local HTTP
 reader fixture. It exercises authentication, fingerprint rejection before
 credentials, large binary transfers, simultaneous channels, half-close,
 port conflicts, disconnect cleanup, cancellation and interactive password/OTP.
-All test credentials are synthetic. The bundled GUI/native build checks are
-part of the GitHub workflow and remain to be run on those platforms. This
-workspace's Python cannot load its Tk shared library, so GUI QA was not run
-here. No university login, VPN integration or code signing has been tested.
+All test credentials are synthetic. The first GitHub build passed native
+configuration and GUI checks on Windows x64, Apple Silicon Mac, Linux x64
+and Linux ARM64. Intel Mac built successfully but failed at import because
+its cryptography extension loaded an incompatible bundled OpenSSL. Version
+0.1.1 adds the static-linking fix and a guard for that failure; its native
+rebuild is still required. This workspace cannot load its Tk shared library,
+so GUI QA is performed by the native GitHub jobs. No university login, VPN
+integration or distribution code signing has been tested.
 
 Reference guidance:
 

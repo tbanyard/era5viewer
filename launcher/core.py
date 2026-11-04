@@ -24,7 +24,7 @@ import urllib.request
 import paramiko
 
 VPN_HELP = "https://www.bath.ac.uk/guides/setting-up-vpn-on-your-device/"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 
 class ConnectionError(Exception):

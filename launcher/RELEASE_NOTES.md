@@ -1,4 +1,9 @@
-ERA5Viewer Connect 0.1.0 is a companion desktop launcher for the ERA5 Viewer.
+ERA5Viewer Connect 0.1.1 is a companion desktop launcher for the ERA5 Viewer.
+
+This update fixes Intel Mac packaging: cryptography is compiled with static
+OpenSSL linkage, and the build checks for conflicting shared OpenSSL libraries
+before creating the application. The bundled configuration and GUI checks are
+retained on every platform.
 
 - Prompts for the user's SSH username and password; saves neither password
   nor SSH private keys.
