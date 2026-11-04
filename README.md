@@ -1,4 +1,4 @@
-# era5viewer v1.2
+# era5viewer v1.3
 
 A local ERA5 viewer combining the map controls from
 SkySightStyleAtmosphereViewer with point inspection, local map assets and the
@@ -23,7 +23,7 @@ Python 3.10 or newer, Python's venv support and internet access for that initial
 installation. Later runs use that environment. The project directory can be
 read-only; each user owns their installation. Stop with Ctrl+C.
 
-Open **http://127.0.0.1:8767/** in your browser.
+Open **http://127.0.0.1:8768/** in your browser.
 
 If you already use an activated Conda environment, you can run directly:
 
@@ -45,7 +45,7 @@ On a shared server, a user-owned Conda environment is another option:
     bash /data1/tim/era5viewer/start.sh --config "$HOME/my-era5.json"
 
 You can also double-click index.html while the reader is running. Its connection
-dialog defaults to http://127.0.0.1:8767. Browsers that restrict local-file
+dialog defaults to http://127.0.0.1:8768. Browsers that restrict local-file
 network requests can use the localhost URL above.
 
 ## Your data
@@ -55,7 +55,7 @@ config.json starts with:
     {
       "data_root": "/data3/ERA5",
       "host": "127.0.0.1",
-      "port": 8767,
+      "port": 8768,
       "cache_mb": 256
     }
 
@@ -83,7 +83,7 @@ pressure views are derived from that format.
 Leave the shared `config.json` as the administrator's default. Use a personal
 file as described below, or override settings for your own reader:
 
-    bash start.sh --data-root /other/ERA5 --port 8767 --cache-mb 512
+    bash start.sh --data-root /other/ERA5 --port 8768 --cache-mb 512
 
 After adding data files, click the rescan button in the header. Restart your
 reader after changing your personal configuration or updating the viewer.
@@ -110,19 +110,19 @@ You can alternatively set `ERA5VIEWER_CONFIG` to your personal JSON path.
 Command-line settings such as `--port` override values from the chosen file.
 
 Each user should run a reader **under their own server account** on a different
-free server port. For example, Alice can choose 8768 and Bob 8769. Their data
+free server port. For example, Alice can choose 8769 and Bob 8770. Their data
 roots, caches and configurations are independent, even though they use the same
 read-only project and may read the same ERA5 archive.
 
 For Alice's reader, run this on her computer and leave it open:
 
-    ssh -N -L 8768:127.0.0.1:8768 alice@data-machine
+    ssh -N -L 8769:127.0.0.1:8769 alice@data-machine
 
-Then open `http://127.0.0.1:8768/`, or set that address in the HTML viewer. The
+Then open `http://127.0.0.1:8769/`, or set that address in the HTML viewer. The
 personal-configuration panel generates startup and tunnel commands for the
 chosen port. Change `data-machine` to your server's actual hostname. If that
 local port is busy, use another local forwarding port, for example
-`ssh -N -L 9000:127.0.0.1:8768 alice@data-machine`, and open
+`ssh -N -L 9000:127.0.0.1:8769 alice@data-machine`, and open
 `http://127.0.0.1:9000/`.
 
 The configuration editor prepares files and commands; it does not change a
@@ -134,10 +134,11 @@ then connect to it. No project-directory write permission is needed to run it.
 - **Field:** T, U, V and derived wind speed. Temperature displays °C or K.
   Additional numeric variables on the same model-level grid are discovered
   automatically; names and units come from NetCDF metadata.
-- **Time:** only records actually present. Animation waits for each slice to
-  load initially, then loops through cached 2-D frames for the selected day.
-  The first press of Play buffers the day; the animation interval is selectable.
-  Point profiles update when playback pauses.
+- **Time.** Play loops through the available records for the selected day.
+  The map, selected point profile and active cross-section advance together.
+  The last displayed frame stays visible while the next loads. Plot zoom and
+  axes, and the cross-section colour scale, hold steady during playback.
+  The animation interval is selectable.
 - **Model:** select a model level. In L137, 1 is at the top and 137 near the
   surface; each level's pressure varies across the map.
 - **Pressure:** choose hPa using presets or an arbitrary number. Pressure comes
@@ -159,6 +160,16 @@ then connect to it. No project-directory write permission is needed to run it.
   Pressure labels use conventional hPa values on a logarithmic pressure axis.
   Drag a rectangle or scroll over the chart to zoom. Choose both axes, just
   the y-axis, or just the x-axis, and use Reset zoom (or Escape) to reset.
+- **Cross-section.** Turn on **Cross-section** beside the map export controls,
+  then click two or more waypoints. Ctrl-click (or ⌘-click) adds a waypoint
+  with the tool off. Add up to 26 waypoints and use **Undo point** or
+  **Clear route** to revise the route. Turn the tool off for ordinary point
+  selection. Matching letters on the map and chart mark the waypoints along
+  the cumulative-distance axis, in kilometres. Choose log-pressure, height
+  above sea level (MSL) or height above ground (AGL), depending on your data.
+  The brown line marks the surface. The field follows the map's variable,
+  and the chart supports drag and scroll zoom. On small screens, use the
+  **Cross-section** and **Selected point** buttons to switch panels.
 - **Map:** pan/zoom, fit the data, toggle wind arrows/graticules, change opacity
   and toggle labelled contours of the displayed field. The grid badge reports
   measured longitude/latitude spacing rather than assuming 0.25 degrees.
@@ -264,13 +275,14 @@ own I/O buffers are additional to that budget. Increase cache_mb to retain
 more timestamps. A drift retains at most four U/V layer pairs locally as it
 progresses, so a 10-day track does not retain every 3-D weather cube.
 
-Only 2-D slices and point profiles are sent to the browser. There is also a
-**64 MiB browser cache for decoded frame arrays**, plus small metadata. For
+The browser receives 2-D slices, point profiles and sampled cross-sections.
+It keeps a **64 MiB map frame cache** and a separate **24 MiB plot frame cache**.
+For
 240×121 points, one T/U/V display frame is approximately 0.33 MiB; all eight
 times total approximately 2.7 MiB. The original 194 MB files are not transferred
-to the browser. Upcoming frames are prefetched; Play buffers the selected day
-before looping. Cached frames do not request the reader again. Larger grids
-use least-recently-used eviction and may still need to read evicted frames.
+to the browser. During playback, the viewer prefetches the next timestamp.
+Cached frames do not request the reader again. The caches evict the least
+recently used frames when full.
 Changing the variable/layer creates different display frames; rescanning clears
 this cache. Caching does not invent intermediate ERA5 timestamps. The ERA5 archive is
 read-only: no preprocessing or derived files are required there.
@@ -284,12 +296,12 @@ graticules, coastlines, wind arrows, profiles and exports continue to work.
 
 Run the reader on the data machine. From your desktop:
 
-    ssh -N -L 8767:127.0.0.1:8767 user@data-machine
+    ssh -N -L 8768:127.0.0.1:8768 user@data-machine
 
-Open http://127.0.0.1:8767/ on your desktop. The SSH tunnel reaches the remote
+Open http://127.0.0.1:8768/ on your desktop. The SSH tunnel reaches the remote
 reader while keeping its default loopback binding. Run the SSH command in
 a terminal on your desktop and leave it open; the reader address stays
-http://127.0.0.1:8767. The SSH command is not a reader address.
+http://127.0.0.1:8768. The SSH command is not a reader address.
 
 ## Troubleshooting
 
@@ -299,7 +311,7 @@ rescan. Year directories are scanned recursively.
 **Reader offline:** run bash start.sh and check the connection address. A browser
 needs the reader to access NetCDF on /data3/ERA5.
 
-**Port busy:** run bash start.sh --port 8768, then use that URL or change the
+**Port busy:** run bash start.sh --port 8769, then use that URL or change the
 connection dialog.
 
 **Missing Python package:** install from `requirements.txt` in your chosen

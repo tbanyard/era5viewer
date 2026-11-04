@@ -1,5 +1,16 @@
 # Release notes
 
+## v1.3 (1.3.0)
+
+- Map waypoints via the Cross-section tool or Ctrl-click. Follow multiple
+  great-circle legs on a cumulative-distance axis with matching map labels.
+- Cross-sections for the displayed field in log-pressure or geopotential
+  height, with the surface marked and missing data left blank.
+- Synchronized playback for the map, point profile and cross-section. The
+  next frame is prefetched and the current plots stay visible while waiting.
+- The default reader port is 8768. Personal configurations and command-line
+  port overrides are supported.
+
 ## v1.2 (1.2.0)
 
 - Layer NetCDF downloads for the displayed variable, time and vertical slice,

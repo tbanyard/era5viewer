@@ -120,3 +120,18 @@ represented screen samples. Values beyond the bounds are colour-clipped, not
 removed or altered. Fixed limits retain comparisons between times. PNG exports
 use the displayed units and zoom; CSV keeps original data units and all profile
 levels independently of plot zoom.
+
+## Cross-sections
+
+Each leg follows the shorter great-circle arc on a sphere of radius 6,371 km.
+The horizontal axis is cumulative distance across those legs, and every
+waypoint is sampled exactly. Each transect uses up to 512 columns. Regional
+grid gaps remain blank, including where a route leaves and re-enters the data.
+
+The reader bilinearly samples the native model columns along the route, then
+interpolates vertically between adjacent model levels. Pressure interpolation
+uses log-pressure, and height uses geopotential height. Wind speed is computed
+from the interpolated wind components. The brown line shows surface pressure,
+surface geopotential height (MSL), or zero height above ground (AGL). Samples
+below the surface, outside represented levels, or across missing levels are
+left blank. Sea-level height requires matching surface geopotential.

@@ -60,7 +60,7 @@ def hydrostatic_height(temperature, surface_pressure, levels, humidity=None):
     return out
 
 
-def interpolate_columns(coordinate, values, target, logarithmic=False):
+def interpolate_columns(coordinate, values, target, logarithmic=False, levels=None):
     """Interpolate between adjacent model levels; never bridge a missing layer.
 
     Coordinate may increase or decrease with level. Below/above the first/last
@@ -80,6 +80,8 @@ def interpolate_columns(coordinate, values, target, logarithmic=False):
         exact = np.isfinite(c[i]) & np.isclose(c[i], target, rtol=0, atol=1e-7)
         out = np.where(exact, v[i], out)
     for i in range(c.shape[0] - 1):
+        if levels is not None and levels[i + 1] != levels[i] + 1:
+            continue
         a, b = c[i], c[i + 1]
         valid = np.isfinite(a) & np.isfinite(b) & np.isfinite(v[i]) & np.isfinite(v[i + 1])
         bracket = valid & (target > np.minimum(a, b)) & (target < np.maximum(a, b))
@@ -104,17 +106,22 @@ def bracket(axis, value, cyclic=False):
     return low, high, (value - axis[low]) / (axis[high] - axis[low])
 
 
-def sample_grid(array, latitudes, longitudes, lat, lon, cyclic=False):
+def grid_weights(latitudes, longitudes, lat, lon, cyclic=False):
     yi, yj, yw = bracket(latitudes, lat)
     if not cyclic:
         centre = (longitudes[0] + longitudes[-1]) / 2
         lon += 360 * round((centre - lon) / 360)
     xi, xj, xw = bracket(longitudes, lon, cyclic)
-    result = np.zeros(np.asarray(array).shape[:-2], dtype=np.float64)
     for y, wy in ((yi, 1 - yw), (yj, yw)):
         for x, wx in ((xi, 1 - xw), (xj, xw)):
             weight = wy * wx
             if weight > 1e-12:
-                # Do not renormalise away a missing corner near terrain.
-                result = result + array[..., y, x] * weight
+                yield y, x, weight
+
+
+def sample_grid(array, latitudes, longitudes, lat, lon, cyclic=False):
+    result = np.zeros(np.asarray(array).shape[:-2], dtype=np.float64)
+    for y, x, weight in grid_weights(latitudes, longitudes, lat, lon, cyclic):
+        # Do not renormalise away a missing corner near terrain.
+        result = result + array[..., y, x] * weight
     return result

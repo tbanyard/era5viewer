@@ -1,4 +1,28 @@
-# Verification · v1.2
+# Verification
+
+## v1.3 checks
+
+- 43 Python tests passed against synthetic NetCDF files, including both the
+  NetCDF3 and NetCDF4 readers, the cross-section endpoint, longitude-seam
+  crossings, unequal legs, partial columns, terrain, and regional coverage.
+- Cross-section waypoint values matched independently interpolated native
+  profiles in pressure, height MSL and height AGL. Terrain and missing model
+  layers were checked for gaps in the plotted data.
+- DOM and native canvas checks passed against a running reader. Tested the
+  Cross-section button, Ctrl-click, waypoint labels, undo/clear, vertical axes,
+  and zoom. A deliberately delayed response verified that playback retained the
+  current map and both plots, paused on the displayed time, and then resumed
+  in sync with the same plot zoom and cross-section colour scale.
+- The default reader started on port 8768 and reported version 1.3.0.
+  Personal configurations and command-line overrides passed their regression tests.
+- A synthetic 121 × 240 grid with eight L137 timestamps was used to check
+  wind-speed transects in pressure and height. Reader-side median times were
+  0.18 s for pressure and 0.23 s for MSL on a four-waypoint, 156-column route.
+- The full-browser runner could not start Chromium in this environment.
+  Desktop and mobile browser checks remain pending, as does testing against the
+  real shared archive.
+
+## Earlier verification
 
 Validated using explicitly synthetic NetCDF fixtures and the two project
 archives supplied in this conversation. No access to the user's actual

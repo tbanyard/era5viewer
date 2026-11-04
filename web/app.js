@@ -7,12 +7,14 @@
   function stored(key, fallback) { try { return localStorage.getItem("era5viewer." + key) || fallback; } catch (_) { return fallback; } }
   function remember(key, value) { try { localStorage.setItem("era5viewer." + key, value); } catch (_) {} }
   const state = {
-    base: /https?:/.test(location.protocol) ? location.origin : stored("api", "http://127.0.0.1:8767"),
+    base: /https?:/.test(location.protocol) ? location.origin : stored("api", "http://127.0.0.1:8768"),
     catalog: null, times: [], ti: 0, date: "", variable: "t", mode: "height", value: 5, reference: "msl",
     preferredReference: stored("heightReference", "msl"),
     grid: null, selected: null, profile: null, playing: false, timer: null,
     serial: 0, daySerial: 0, connectSerial: 0, driftSerial: 0, sliceAbort: null, pointAbort: null,
     drift: null, tracks: [], trackId: 0, activeTrack: null, tracing: false,
+    waypoints: [], sectionEditing: false, section: null, sectionPlot: null, sectionView: null,
+    sectionAxis: "height_msl", sectionAbort: null, profileRequest: null, playViews: null,
     fitted: false, scale: [-40, 20], profileView: null, profilePlot: null,
     cacheEpoch: 0, prefetchSerial: 0, playSerial: 0, contourCache: null,
     compassCoordinates: stored("compassCoordinates", "0") === "1",
@@ -20,6 +22,8 @@
   };
   const frames = {items: new Map(), bytes: 0, limit: 64*1024*1024};
   const pendingFrames = new Map();
+  const charts = {items: new Map(), bytes: 0, limit: 24*1024*1024};
+  const pendingCharts = new Map();
   state.frameCache = frames;
   const NAMES = { t: "Temperature", u: "U wind · eastward", v: "V wind · northward", wind_speed: "Wind speed" };
   const map = L.map("map", { zoomControl: false, preferCanvas: true, minZoom: 1, maxZoom: 12,
@@ -49,10 +53,10 @@
   }
   function current() { return state.times[state.ti] || null; }
   function clock(record) { return record ? record.datetime.slice(11, 16) : "—"; }
-  function layerLabel() {
-    if (state.mode === "model") return "Model level " + state.value;
-    if (state.mode === "pressure") return state.value + " hPa";
-    return state.value + " km " + (state.reference === "msl" ? "above sea level" : "AGL");
+  function layerLabel({mode, value, reference} = state) {
+    if (mode === "model") return "Model level " + value;
+    if (mode === "pressure") return value + " hPa";
+    return value + " km " + (reference === "msl" ? "above sea level" : "AGL");
   }
   function fieldMeta() { const r = current(); return r && r.fields.find(f => f.id === state.variable); }
   function units(variable = state.variable) {
@@ -95,6 +99,7 @@
   function abortLoads() {
     if (state.sliceAbort) state.sliceAbort.abort();
     if (state.pointAbort) state.pointAbort.abort();
+    if (state.sectionAbort) state.sectionAbort.abort();
   }
   function clearDrift(all = false) {
     if (all) {state.driftSerial++; state.tracing=false; state.tracks=[];}
@@ -112,6 +117,7 @@
     $("point-metrics").replaceChildren(); $("profile-chart").replaceChildren();
     $("point-context").textContent = current() ? state.date + " · " + clock(current()) + " UTC · " + layerLabel() : "";
     $("profile-note").textContent = "";
+    clearSectionFrame();
     if (state.selected) $("point-status").textContent = "Reading selected point…";
     scheduleDraw();
   }
@@ -185,6 +191,7 @@
     clearTimeout(changeTimer); changeTimer = setTimeout(loadSlice, 140);
   }
   function setLevel(value) {
+    stopPlay();
     if (!Number.isFinite(value)) { invalidate(); notice("Enter a numeric layer value.", true); return; }
     if (state.mode === "model" && current()) value = current().levels.reduce((a,b) => Math.abs(b-value) < Math.abs(a-value) ? b : a);
     state.value = value; $("level").value = value; $("level-slider").value = value;
@@ -205,17 +212,22 @@
     return out;
   }
   function frameKey(request) { return state.base + "|" + JSON.stringify(request); }
-  function cachedFrame(key) {
-    const item=frames.items.get(key);
-    if (item) {frames.items.delete(key);frames.items.set(key,item);return item.data;}
+  function cachedFrame(key, cache = frames) {
+    const item=cache.items.get(key);
+    if (item) {cache.items.delete(key);cache.items.set(key,item);return item.data;}
     return null;
   }
-  function cacheFrame(key,data) {
-    const bytes=Object.values(data.arrays).reduce((n,a)=>n+a.byteLength,0);
-    if (bytes>frames.limit) return;
-    const old=frames.items.get(key);if(old){frames.bytes-=old.bytes;frames.items.delete(key);}
-    while(frames.items.size&&frames.bytes+bytes>frames.limit){const k=frames.items.keys().next().value;frames.bytes-=frames.items.get(k).bytes;frames.items.delete(k);}
-    frames.items.set(key,{data,bytes});frames.bytes+=bytes;
+  function cacheFrame(cache, key, data, bytes) {
+    if (bytes > cache.limit) return;
+    const old = cache.items.get(key);
+    if (old) { cache.bytes -= old.bytes; cache.items.delete(key); }
+    while (cache.items.size && cache.bytes + bytes > cache.limit) {
+      const oldest = cache.items.keys().next().value;
+      cache.bytes -= cache.items.get(oldest).bytes;
+      cache.items.delete(oldest);
+    }
+    cache.items.set(key, {data, bytes});
+    cache.bytes += bytes;
   }
   async function getFrame(request,signal) {
     const key=frameKey(request),cached=cachedFrame(key);if(cached)return cached;
@@ -226,23 +238,64 @@
       pending={signal};
       pending.promise=api("/api/slice",request,signal).then(data=>{
         const arrays={};for(const [name,encoded] of Object.entries(data.arrays))arrays[name]=decodeArray(encoded,data.shape[0]*data.shape[1]);
-        const decoded=Object.assign(data,{arrays});if(epoch===state.cacheEpoch)cacheFrame(key,decoded);return decoded;
+        const decoded = Object.assign(data, {arrays});
+        const bytes = Object.values(arrays).reduce((total, array) => total + array.byteLength, 0);
+        if (epoch === state.cacheEpoch) cacheFrame(frames, key, decoded, bytes);
+        return decoded;
       }).finally(()=>{if(pendingFrames.get(key)===pending)pendingFrames.delete(key);});
       pendingFrames.set(key,pending);
     }
     return pending.promise;
   }
-  function frameArgs(record,template=args()) {return Object.assign({},template,{file:record.file,index:record.index});}
+  function selectionFor(record, preferred = state) {
+    const variable = record.fields.some(f => f.id === preferred.variable) ? preferred.variable : record.fields[0].id;
+    let {mode, value} = preferred;
+    if ((mode === "height" && !record.height_available) || (mode === "pressure" && !record.pressure_available)) {
+      mode = "model";
+      value = record.levels.at(-1);
+    }
+    if (mode === "model") value = record.levels.reduce((a, b) => Math.abs(b-value) < Math.abs(a-value) ? b : a);
+    return {variable, mode, value, reference: record.msl_available ? preferred.preferredReference : "agl"};
+  }
+  function frameArgs(record, preferred) {
+    return args({file: record.file, index: record.index, ...selectionFor(record, preferred)});
+  }
+  async function getChart(kind, request, signal) {
+    const key = kind + "|" + frameKey(request);
+    const cached = cachedFrame(key, charts);
+    if (cached) return cached;
+    let pending = pendingCharts.get(key);
+    if (pending?.signal?.aborted) pending = null;
+    if (!pending) {
+      const epoch = state.cacheEpoch;
+      pending = {signal};
+      pending.promise = api("/api/" + kind, request, signal).then(data => {
+        let bytes = 8192;
+        if (kind === "cross-section") {
+          data.values = decodeArray(data.values, data.shape[0] * data.shape[1]);
+          bytes += data.values.byteLength + 64 * data.path.length;
+        } else {
+          bytes += Object.values(data.profiles).reduce((total, values) => total + values.length * 8, 0);
+        }
+        if (epoch === state.cacheEpoch) cacheFrame(charts, key, data, bytes);
+        return data;
+      }).finally(() => {
+        if (pendingCharts.get(key) === pending) pendingCharts.delete(key);
+      });
+      pendingCharts.set(key, pending);
+    }
+    return pending.promise;
+  }
   function cacheStatus(message) {
     const count=state.times.filter(r=>frames.items.has(frameKey(frameArgs(r)))).length;
     $("animation-status").textContent=message||count+" / "+state.times.length+" frames cached";
     $("animation-status").title=(frames.bytes/1024/1024).toFixed(1)+" MiB of the 64 MiB browser frame cache";
   }
   async function warmFrames() {
-    const job=++state.prefetchSerial,template=args(),records=state.times.slice(),ti=state.ti,epoch=state.cacheEpoch;
+    const job=++state.prefetchSerial,records=state.times.slice(),ti=state.ti,epoch=state.cacheEpoch;
     for(let n=1;n<=Math.min(2,records.length-1);n++) {
       if(job!==state.prefetchSerial||epoch!==state.cacheEpoch||state.playing)return;
-      try {await getFrame(frameArgs(records[(ti+n)%records.length],template));} catch(_){return;}
+      try {await getFrame(frameArgs(records[(ti+n)%records.length]));} catch(_){return;}
       if(job===state.prefetchSerial)cacheStatus();
     }
   }
@@ -265,6 +318,22 @@
     state.scale=plots.niceExtent(lo,hi,6);
     $("range-min").value=plots.tickLabel(state.scale[0]);$("range-max").value=plots.tickLabel(state.scale[1]);
   }
+  function showFrame(data, requestArgs) {
+    notice("");
+    state.grid = data;state.contourCache=null;
+    $("empty-state").hidden = true; $("empty-connect").hidden = true;
+    updateScale();
+    if (!state.scale.every(Number.isFinite) || state.scale[1] <= state.scale[0]) state.scale = [0,1];
+    updateLegend(); scheduleDraw();
+    $("slice-export").href = url("/api/export/slice", requestArgs); $("slice-export").classList.remove("disabled");
+    $("layer-netcdf").href=url("/api/export/layer.nc",requestArgs);$("layer-netcdf").classList.remove("disabled");
+    $("map-png").disabled=false;
+    const warnings = data.record.warnings.filter(w => state.mode === "height" || !w.includes("height") && !w.includes("Height") && !w.includes("geopotential"));
+    if (!data.stats.valid) notice("This layer is outside the represented column or contains no valid values. Try another layer.");
+    else if (warnings.length) notice(warnings.join(" · "));
+    $("data-badge").textContent = "ERA5 · " + data.shape[1] + " × " + data.shape[0] + " · " + resolutionLabel(data.record);
+    if (!state.fitted) { fitData(); state.fitted = true; }
+  }
   async function loadSlice() {
     clearTimeout(changeTimer);
     if (!current()) return false;
@@ -275,22 +344,11 @@
     try {
       const data = await getFrame(requestArgs, controller.signal);
       if (serial !== state.serial) return false;
-      state.grid = data;state.contourCache=null;
-      $("empty-state").hidden = true; $("empty-connect").hidden = true;
-      updateScale();
-      if (!state.scale.every(Number.isFinite) || state.scale[1] <= state.scale[0]) state.scale = [0,1];
-      updateLegend(); scheduleDraw();
-      $("slice-export").href = url("/api/export/slice", requestArgs); $("slice-export").classList.remove("disabled");
-      $("layer-netcdf").href=url("/api/export/layer.nc",requestArgs);$("layer-netcdf").classList.remove("disabled");
-      $("map-png").disabled=false;
-      const warnings = data.record.warnings.filter(w => state.mode === "height" || !w.includes("height") && !w.includes("Height") && !w.includes("geopotential"));
-      if (!data.stats.valid) notice("This layer is outside the represented column or contains no valid values. Try another layer.");
-      else if (warnings.length) notice(warnings.join(" · "));
-      $("data-badge").textContent = "ERA5 · " + data.shape[1] + " × " + data.shape[0] + " · " + resolutionLabel(data.record);
-      if (!state.fitted) { fitData(); state.fitted = true; }
-      if (state.selected && !state.playing) loadPoint();
-      else if(state.selected)$("point-status").textContent="Profile updates when animation is paused.";
-      cacheStatus();if(!state.playing)warmFrames();
+      showFrame(data, requestArgs);
+      if (state.selected) loadPoint();
+      if (state.waypoints.length >= 2) loadSection();
+      cacheStatus();
+      if (!state.playing) warmFrames();
       return true;
     } catch (error) {
       if (error.name !== "AbortError" && serial === state.serial) {
@@ -323,9 +381,7 @@
       const preferred = /^\d\d:\d\d$/.test(lastClock) ? minutes(lastClock) : 720;
       state.ti = result.times.reduce((best,r,i) => Math.abs(minutes(clock(r))-preferred) < Math.abs(minutes(clock(result.times[best]))-preferred) ? i : best, 0);
       const r = current();
-      state.variable = r.fields.some(f => f.id === state.variable) ? state.variable : r.fields[0].id;
-      if (state.mode === "height" && !r.height_available || state.mode === "pressure" && !r.pressure_available) { state.mode = "model"; state.value = r.levels[r.levels.length-1]; }
-      state.reference = r.msl_available ? state.preferredReference : "agl";
+      Object.assign(state, selectionFor(r));
       populateFields(); configureLayer(); makeTimeTicks();
       $("time-slider").max = state.times.length - 1; $("time-slider").disabled = state.times.length < 2;
       $("play").disabled = state.times.length < 2;
@@ -343,7 +399,13 @@
     $("variable").value = state.variable; $("variable").disabled = false;
     const wind = r.fields.some(f=>f.id==="u") && r.fields.some(f=>f.id==="v");
     $("wind-toggle").disabled = !wind; $("drift-run").disabled = !wind || state.tracing;
-    $("profile-variable").replaceChildren(...["t","wind_speed","u","v"].filter(v => r.fields.some(f=>f.id===v)).map(v=>new Option(NAMES[v], v)));
+    const profile = $("profile-variable"), selected = profile.value;
+    const choices = ["t", "wind_speed", "u", "v"].filter(v => r.fields.some(f => f.id === v));
+    if (choices.join() !== Array.from(profile.options, o => o.value).join()) {
+      profile.replaceChildren(...choices.map(v => new Option(NAMES[v], v)));
+      if (choices.includes(selected)) profile.value = selected;
+    }
+    configureSectionAxis(r);
   }
   function makeTimeTicks() {
     const size = Math.max(2, Math.floor($("time-ticks").clientWidth / 44));
@@ -355,45 +417,84 @@
       b.onclick = () => changeTime(i); return [b];
     }));
   }
-  function changeTime(index, play = false) {
-    if (!play) stopPlay();
+  function selectTime(index, {variable, mode, value, reference} = selectionFor(state.times[index])) {
+    state.ti = index;
+    Object.assign(state, {variable, mode, value, reference});
+    populateFields();
+    configureLayer();
+  }
+  function changeTime(index) {
+    stopPlay();
     if (!state.times.length) return;
-    state.ti = Math.max(0, Math.min(state.times.length-1, index));
-    const r = current();
-    if (!r.fields.some(f=>f.id===state.variable)) state.variable = r.fields[0].id;
-    if (state.mode === "height" && !r.height_available || state.mode === "pressure" && !r.pressure_available) { state.mode = "model"; state.value = r.levels[r.levels.length-1]; }
-    state.reference = r.msl_available ? state.preferredReference : "agl";
-    populateFields(); configureLayer(); invalidate(); updateHead();
+    selectTime(Math.max(0, Math.min(state.times.length - 1, index)));
+    invalidate();
     return loadSlice();
   }
-  function stopPlay(refresh=false) {
-    const was=state.playing;state.playing=false;state.playSerial++;clearTimeout(state.timer);
-    state.playAbort?.abort();$("play").textContent="▶";$("play").setAttribute("aria-label","Play available times");
-    cacheStatus();if(was&&refresh&&state.selected&&state.grid)loadPoint();
+  function stopPlay() {
+    state.playing = false;
+    state.playSerial++;
+    clearTimeout(state.timer);
+    state.playAbort?.abort();
+    state.playViews = null;
+    $("play").textContent = "▶";
+    $("play").setAttribute("aria-label", "Play available times");
+    cacheStatus();
   }
-  async function playNext() {
-    if (!state.playing) return;
-    const generation=state.playSerial;
-    const ok = await changeTime((state.ti+1)%state.times.length, true);
-    if (!ok) { stopPlay(true); return; }
-    if (state.playing&&generation===state.playSerial) state.timer = setTimeout(playNext, +$("animation-speed").value);
+  function chartResult(kind, request, signal) {
+    if (!request) return null;
+    return getChart(kind, request, signal).then(data => ({data, request}), error => ({error}));
   }
-  async function startPlay() {
-    state.playing=true;state.prefetchSerial++;const generation=++state.playSerial;
-    const controller=new AbortController();state.playAbort=controller;
-    $("play").textContent="Ⅱ";$("play").setAttribute("aria-label","Pause animation");
-    const template=args(),records=state.times.slice();
-    try {
-      for(let n=0;n<records.length;n++) {
-        if(!state.playing||generation!==state.playSerial)return;
-        cacheStatus("Buffering "+(n+1)+" / "+records.length+"…");
-        await getFrame(frameArgs(records[(state.ti+n)%records.length],template),controller.signal);
+  function queuePlayback(generation, delay, preferred) {
+    const index = (state.ti + 1) % state.times.length;
+    const record = state.times[index], request = frameArgs(record, preferred);
+    const signal = state.playAbort.signal;
+    const pending = Promise.allSettled([
+      getFrame(request, signal),
+      chartResult("profile", pointRequest(request), signal),
+      chartResult("cross-section", sectionRequest(record, request), signal)
+    ]);
+    state.timer = setTimeout(async () => {
+      if (!state.playing || generation !== state.playSerial) return;
+      cacheStatus("Waiting for " + clock(record) + " UTC…");
+      const [mapFrame, point, section] = await pending;
+      if (!state.playing || generation !== state.playSerial) return;
+      if (mapFrame.status === "rejected") {
+        stopPlay();
+        if (mapFrame.reason.name !== "AbortError") notice(mapFrame.reason.message, true);
+        return;
       }
-      if(state.playing&&generation===state.playSerial){cacheStatus();playNext();}
-    } catch(error){if(generation===state.playSerial){stopPlay(true);if(error.name!=="AbortError")notice(error.message,true);}}
+      abortLoads();
+      state.serial++;
+      selectTime(index, request);
+      showFrame(mapFrame.value, request);
+      if (point.value) showPointFrame(point.value);
+      if (section.value) showSectionFrame(section.value);
+      else if (state.waypoints.length >= 2) {
+        showSectionFrame({error: new Error("The cross-section coordinate is unavailable at this time.")});
+      }
+      cacheStatus();
+      queuePlayback(generation, +$("animation-speed").value, preferred);
+    }, delay);
+  }
+  function startPlay() {
+    if (!state.grid || state.times.length < 2) return;
+    state.playing = true;
+    state.prefetchSerial++;
+    const generation = ++state.playSerial;
+    state.playAbort = new AbortController();
+    state.playViews = {};
+    lockProfileAxes(state.profilePlot);
+    lockSectionAxes(state.sectionPlot);
+    $("play").textContent = "Ⅱ";
+    $("play").setAttribute("aria-label", "Pause animation");
+    const {variable, mode, value, preferredReference} = state;
+    queuePlayback(generation, 0, {variable, mode, value, preferredReference});
   }
   async function connect(refresh = false) {
-    stopPlay(); state.daySerial++; state.cacheEpoch++; state.prefetchSerial++; frames.items.clear(); frames.bytes=0; pendingFrames.clear(); invalidate();
+    stopPlay(); state.daySerial++; state.cacheEpoch++; state.prefetchSerial++;
+    frames.items.clear(); frames.bytes=0; pendingFrames.clear();
+    charts.items.clear(); charts.bytes=0; pendingCharts.clear();
+    invalidate();
     const serial = ++state.connectSerial;
     state.catalog = null; state.times = []; updateHead();
     $("connection-state").textContent = "Connecting"; $("connection-dot").className = "";
@@ -467,9 +568,9 @@
     component: [[33,73,137],[74,137,186],[150,195,209],[241,242,224],[244,198,133],[223,135,69],[155,67,38]],
     speed: [[57,40,111],[54,85,142],[34,134,142],[46,179,124],[151,211,94],[246,224,108]]
   };
-  function palette() { return state.variable === "t" ? PALETTES.temperature : ["u","v"].includes(state.variable) ? PALETTES.component : PALETTES.speed; }
-  function lut() {
-    const p=palette(), result=[];
+  function palette(variable = state.variable) { return variable === "t" ? PALETTES.temperature : ["u","v"].includes(variable) ? PALETTES.component : PALETTES.speed; }
+  function lut(variable) {
+    const p=palette(variable), result=[];
     for(let i=0;i<256;i++) { const v=i/255*(p.length-1), j=Math.min(p.length-2,Math.floor(v)), w=v-j; result.push(p[j].map((a,k)=>Math.round(a*(1-w)+p[j+1][k]*w))); }
     return result;
   }
@@ -523,6 +624,7 @@
     if(g&&$("contour-toggle").checked)drawContours(size,g);
     if (g && $("wind-toggle").checked && g.arrays.u && g.arrays.v) drawWind(size,g);
     drawTracks(size);
+    drawSectionRoute();
   }
   function drawCoastlines(size) {
     const coast=window.ERA5Coastlines;if(!coast)return;
@@ -659,7 +761,7 @@
     const object=URL.createObjectURL(blob),a=document.createElement("a");a.href=object;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(object),5000);
   }
   async function exportMapPNG() {
-    stopPlay(true);
+    stopPlay();
     try{let canvas=captureMap();try{await saveCanvas(canvas,"era5-map.png");}catch(error){if(error.name!=="SecurityError")throw error;await saveCanvas(captureMap(false),"era5-map.png");notice("Map PNG exported; the basemap could not be included.");}}
     catch(error){notice(error.message,true);}
   }
@@ -668,37 +770,57 @@
   }
 
   function selectPoint(ll) {
+    stopPlay();
     state.selected={lat:ll.lat,lon:ll.lng}; state.profile=null; state.profileView=null; state.profilePlot=null; $("profile-png").disabled=true;
     marker.setLatLng(ll).addTo(map); showPointPanel();
     updateCoordinates();
     $("point-status").textContent=state.grid?"Reading selected point…":"Load a layer to inspect this point.";
     $("point-metrics").replaceChildren();$("profile-chart").replaceChildren();
+    $("profile-export").classList.add("disabled");
     if(state.grid) loadPoint();
   }
+  function narrowMap() { return window.innerWidth <= 900; }
+  function updatePanels() {
+    const point = !$("point-panel").hidden, section = !$("section-panel").hidden;
+    $("colour-legend").classList.toggle("panel-visible", point);
+    $("colour-legend").classList.toggle("section-visible", section);
+    $("map").parentElement.classList.toggle("both-plots", point && section);
+    $("point-open").hidden = point || !state.selected;
+  }
   function showPointPanel() {
-    $("point-panel").hidden=false; $("point-open").hidden=true; $("colour-legend").classList.add("panel-visible");
+    if (narrowMap()) closeSectionPanel();
+    $("point-panel").hidden = false;
+    updatePanels();
+  }
+  function pointRequest(request = args()) {
+    if (!state.selected) return null;
+    const {winds, ...params} = request;
+    return {...params, lat: state.selected.lat, lon: state.selected.lon};
   }
   async function loadPoint() {
-    if(!state.selected||!state.grid) return;
-    if(state.pointAbort) state.pointAbort.abort();
-    const controller=new AbortController();state.pointAbort=controller;
-    const serial=state.serial, selected=state.selected;
-    const request=args({lat:selected.lat,lon:selected.lon});
-    $("point-status").textContent="Reading selected point…";
-    $("profile-export").classList.add("disabled"); $("profile-png").disabled=true;
-    try {
-      const data=await api("/api/profile",request,controller.signal);
-      if(serial!==state.serial||selected!==state.selected) return;
-      state.profile=data; $("point-status").textContent="";
-      $("point-context").textContent=clock(current())+" UTC · "+layerLabel()+" · bilinear grid sample";
-      renderMetrics();renderProfile();
-      $("profile-export").href=url("/api/export/profile",request);$("profile-export").classList.remove("disabled");
-    } catch(error) {
-      if(error.name!=="AbortError"&&serial===state.serial&&selected===state.selected) {
-        state.profile=null; $("point-status").textContent=error.message;
-        $("point-metrics").replaceChildren();$("profile-chart").replaceChildren();
-      }
+    if (!state.selected || !state.grid) return;
+    state.pointAbort?.abort();
+    const controller = new AbortController();
+    state.pointAbort = controller;
+    const serial = state.serial, selected = state.selected;
+    $("point-status").textContent = "Reading selected point…";
+    $("profile-export").classList.add("disabled");
+    $("profile-png").disabled = true;
+    const result = await chartResult("profile", pointRequest(), controller.signal);
+    if (!controller.signal.aborted && serial === state.serial && selected === state.selected) showPointFrame(result);
+  }
+  function showPointFrame({data, request, error}) {
+    if (error) {
+      $("point-status").textContent = error.message + (state.profile ? " Showing " + clock(state.profile.record) + " UTC." : "");
+      return;
     }
+    state.profile = data;
+    state.profileRequest = request;
+    $("point-status").textContent = "";
+    renderMetrics();
+    renderProfile();
+    $("profile-export").href = url("/api/export/profile", request);
+    $("profile-export").classList.remove("disabled");
   }
   function renderMetrics() {
     const selected=state.profile&&state.profile.selected; if(!selected)return;
@@ -710,48 +832,249 @@
       const unit=document.createElement("small");unit.textContent=units(id);
       value.append(unit);box.append(label,value);return box;
     }));
+    const time = state.profile.record.datetime.slice(0, 10) + " · " + clock(state.profile.record) + " UTC";
+    $("point-context").textContent = time + " · " + layerLabel(state.profileRequest) + " · bilinear grid sample";
     if(selected.wind_from_deg!=null) $("point-context").textContent+=" · wind from "+format(selected.wind_from_deg,0)+"°";
   }
+  function lockProfileAxes(plot) {
+    if (plot && state.playViews && state.playViews.profile?.key !== plot.key) {
+      state.playViews.profile = {key: plot.key, x: plot.fullX, y: plot.fullY};
+    }
+  }
   function renderProfile() {
-    if(!state.profile)return;
-    const variable=$("profile-variable").value,p=state.profile.profiles;
-    $("profile-axis").options[0].disabled=!p.height_agl_m;
-    $("profile-axis").options[1].disabled=!p.pressure_hpa;
-    const plot=plots.profile(state.profile,{variable,axis:$("profile-axis").value,reference:state.reference,convert:v=>convert(v,variable),unit:units(variable),name:NAMES[variable]||variable,view:state.profileView,selected:{mode:state.mode,value:state.value}});
+    if (!state.profile) return;
+    const variable = $("profile-variable").value, p = state.profile.profiles;
+    const {reference, mode, value} = state.profileRequest;
+    $("profile-axis").options[0].disabled = !p.height_agl_m;
+    $("profile-axis").options[1].disabled = !p.pressure_hpa;
+    const plot = plots.profile(state.profile, {
+      variable, axis: $("profile-axis").value, reference,
+      convert: v => convert(v, variable), unit: units(variable), name: NAMES[variable] || variable,
+      view: state.profileView, fallbackView: state.playViews?.profile, selected: {mode, value}
+    });
+    lockProfileAxes(plot);
     state.profilePlot=plot;$("profile-png").disabled=!plot;
     if(!plot){$("profile-chart").textContent="No valid vertical profile at this location.";return;}
     $("profile-axis").value=plot.axis;$("profile-chart").innerHTML=plot.svg;
-    $("profile-note").textContent=p.height_agl_m?(current().fields.some(f=>f.id==="q")?"Hydrostatic geopotential height.":"Height uses dry air approximation (q absent). Geopotential metres "+(state.reference==="msl"?"above sea level.":"above ground.")):"Pressure or model-level coordinate; height is unavailable.";
-    bindProfileZoom();
+    $("profile-note").textContent = p.height_agl_m
+      ? (state.profile.record.fields.some(f => f.id === "q") ? "Hydrostatic geopotential height." :
+        "Height uses dry air approximation (q absent). Geopotential metres " + (reference === "msl" ? "above sea level." : "above ground."))
+      : "Pressure or model-level coordinate; height is unavailable.";
+    bindPlotZoom($("profile-chart"), plot, $("profile-zoom-axis"), setProfileView, resetProfileZoom);
   }
   function setProfileView(x,y) {
     const plot=state.profilePlot;if(!plot||x[1]-x[0]<1e-8||y[1]-y[0]<1e-8)return;
     state.profileView={key:plot.key,x,y};renderProfile();
   }
-  function bindProfileZoom() {
-    const svg=$("profile-chart").querySelector("svg"),plot=state.profilePlot;
+  function resetProfileZoom() {
+    stopPlay();
+    state.profileView = null;
+    renderProfile();
+  }
+  function bindPlotZoom(chart, plot, zoomAxis, setView, reset) {
+    const svg = chart.querySelector("svg");
     let start=null,rect=null;
     const local=e=>{const b=svg.getBoundingClientRect();return {x:(e.clientX-b.left)*plot.width/b.width,y:(e.clientY-b.top)*plot.height/b.height};};
     const inside=p=>p.x>=plot.left&&p.x<=plot.right&&p.y>=plot.top&&p.y<=plot.bottom;
     const clamp=p=>({x:Math.max(plot.left,Math.min(plot.right,p.x)),y:Math.max(plot.top,Math.min(plot.bottom,p.y))});
     svg.onpointerdown=e=>{
-      const p=local(e);if(!inside(p)||e.button!==0)return;e.preventDefault();start=p;svg.setPointerCapture?.(e.pointerId);
+      const p=local(e);if(!inside(p)||e.button!==0)return;e.preventDefault();if(state.playing)stopPlay();start=p;svg.setPointerCapture?.(e.pointerId);
       rect=document.createElementNS("http://www.w3.org/2000/svg","rect");rect.setAttribute("class","profile-selection");svg.append(rect);
     };
     svg.onpointermove=e=>{if(!start)return;const p=clamp(local(e));rect.setAttribute("x",Math.min(start.x,p.x));rect.setAttribute("y",Math.min(start.y,p.y));rect.setAttribute("width",Math.abs(start.x-p.x));rect.setAttribute("height",Math.abs(start.y-p.y));};
     svg.onpointerup=e=>{
-      if(!start)return;const a=start,b=clamp(local(e)),mode=$("profile-zoom-axis").value;start=null;rect?.remove();
+      if(!start)return;const a=start,b=clamp(local(e)),mode=zoomAxis.value;start=null;rect?.remove();
       const useX=mode!=="vertical"&&Math.abs(a.x-b.x)>=6,useY=mode!=="horizontal"&&Math.abs(a.y-b.y)>=6;
-      if(useX||useY)setProfileView(useX?[plot.inverseX(Math.min(a.x,b.x)),plot.inverseX(Math.max(a.x,b.x))]:plot.x,useY?[plot.inverseY(Math.max(a.y,b.y)),plot.inverseY(Math.min(a.y,b.y))]:plot.y);
+      if(useX||useY)setView(useX?[plot.inverseX(Math.min(a.x,b.x)),plot.inverseX(Math.max(a.x,b.x))]:plot.x,useY?[plot.inverseY(Math.max(a.y,b.y)),plot.inverseY(Math.min(a.y,b.y))]:plot.y);
     };
     svg.onpointercancel=()=>{start=null;rect?.remove();};
     svg.addEventListener("wheel",e=>{
       const p=local(e);if(!inside(p))return;e.preventDefault();
-      const factor=e.deltaY>0?1.25:.8,mode=$("profile-zoom-axis").value,cx=plot.inverseX(p.x),cy=plot.inverseY(p.y);
+      const factor=e.deltaY>0?1.25:.8,mode=zoomAxis.value,cx=plot.inverseX(p.x),cy=plot.inverseY(p.y);
       const zoom=(d,c)=>d.map(v=>c+(v-c)*factor);
-      setProfileView(mode==="vertical"?plot.x:zoom(plot.x,cx),mode==="horizontal"?plot.y:zoom(plot.y,cy));
+      setView(mode==="vertical"?plot.x:zoom(plot.x,cx),mode==="horizontal"?plot.y:zoom(plot.y,cy));
     },{passive:false});
-    svg.onkeydown=e=>{if(e.key==="Escape"||e.key==="0"){state.profileView=null;renderProfile();}};
+    svg.onkeydown=e=>{if(e.key==="Escape"||e.key==="0")reset();};
+  }
+  function sectionAxisFor(record) {
+    const available = {
+      height_msl: record?.msl_available,
+      height_agl: record?.height_available,
+      pressure: record?.pressure_available
+    };
+    return Object.keys(available).filter(axis => available[axis]);
+  }
+  function configureSectionAxis(record) {
+    const input = $("section-axis"), axes = sectionAxisFor(record);
+    for (const option of input.options) option.disabled = !axes.includes(option.value);
+    input.value = axes.includes(state.sectionAxis) ? state.sectionAxis : axes[0] || "";
+    input.disabled = !axes.length;
+  }
+  function sectionRequest(record = current(), {variable} = args()) {
+    if (state.waypoints.length < 2) return null;
+    const axes = sectionAxisFor(record);
+    const axis = axes.includes(state.sectionAxis) ? state.sectionAxis : axes[0];
+    if (!axis) return null;
+    return {file: record.file, index: record.index, variable, axis, points: JSON.stringify(state.waypoints)};
+  }
+  function showSectionPanel() {
+    if (narrowMap()) $("point-panel").hidden = true;
+    $("section-panel").hidden = false;
+    updatePanels();
+    updateSectionControls();
+  }
+  function setSectionEditing(editing) {
+    state.sectionEditing = editing;
+    $("section-tool").setAttribute("aria-pressed", String(editing));
+    $("map").classList.toggle("section-editing", editing);
+    updateSectionControls();
+  }
+  function closeSectionPanel() {
+    $("section-panel").hidden = true;
+    setSectionEditing(false);
+    updatePanels();
+  }
+  function updateSectionControls() {
+    const count = state.waypoints.length;
+    const distance = state.section?.distance_km.at(-1);
+    const route = count ? count + (count === 1 ? " waypoint" : " waypoints") +
+      (distance == null ? "" : " · " + format(distance, 1) + " km") + ". " : "";
+    const help = count === 26 ? "Waypoint limit reached." : state.sectionEditing
+      ? "Click the map to add a waypoint." : "Ctrl-click the map to add a waypoint.";
+    $("section-summary").textContent = route + help;
+    $("section-content").hidden = count < 2;
+    $("section-undo").disabled = $("section-clear").disabled = !count;
+  }
+  function clearSectionFrame() {
+    state.section = null;
+    state.sectionPlot = null;
+    $("section-axes").replaceChildren();
+    $("section-raster").getContext("2d").clearRect(0, 0, 540, 286);
+    $("section-legend").hidden = true;
+    $("section-reset").disabled = true;
+    $("section-context").textContent = $("section-note").textContent = $("section-status").textContent = "";
+    updateSectionControls();
+  }
+  function changeRoute(points) {
+    stopPlay();
+    state.sectionAbort?.abort();
+    state.waypoints = points;
+    state.sectionView = null;
+    clearSectionFrame();
+    scheduleDraw();
+    if (points.length >= 2) loadSection();
+  }
+  function addWaypoint({lat, lng}) {
+    showSectionPanel();
+    const points = state.waypoints;
+    if (points.length >= 26) return;
+    const lon = ((lng + 180) % 360 + 360) % 360 - 180;
+    const next = [Number(lat.toFixed(6)), Number(lon.toFixed(6))];
+    if (points.at(-1)?.every((value, i) => value === next[i])) {
+      $("section-status").textContent = "Choose a different location for the next waypoint.";
+      return;
+    }
+    changeRoute([...points, next]);
+  }
+  function drawSectionRoute() {
+    const points = state.section?.path || state.waypoints;
+    if (!points.length) return;
+    const waypoints = state.section?.waypoints || state.waypoints.map((_, index) => index);
+    let previous = map.getCenter().lng;
+    const route = points.map(([lat, lon]) => {
+      previous = lon + 360 * Math.round((previous - lon) / 360);
+      return [lat, previous];
+    });
+    overlay.save();
+    overlay.lineJoin = "round";
+    overlay.lineCap = "round";
+    overlay.font = "bold 12px sans-serif";
+    overlay.textAlign = "center";
+    overlay.textBaseline = "middle";
+    for (const shift of [-360, 0, 360]) {
+      const path = route.map(([lat, lon]) => map.latLngToContainerPoint([lat, lon + shift]));
+      overlay.beginPath();
+      path.forEach(({x, y}, i) => i ? overlay.lineTo(x, y) : overlay.moveTo(x, y));
+      overlay.strokeStyle = "white"; overlay.lineWidth = 5; overlay.stroke();
+      overlay.strokeStyle = "#25524c"; overlay.lineWidth = 2.5; overlay.stroke();
+      waypoints.forEach((index, i) => {
+        const {x, y} = path[index];
+        overlay.beginPath(); overlay.arc(x, y, 9, 0, 2 * Math.PI);
+        overlay.fillStyle = "#25524c"; overlay.fill();
+        overlay.strokeStyle = "white"; overlay.lineWidth = 2; overlay.stroke();
+        overlay.fillStyle = "white"; overlay.fillText(String.fromCharCode(65 + i), x, y + .5);
+      });
+    }
+    overlay.restore();
+  }
+  async function loadSection() {
+    state.sectionAbort?.abort();
+    if (!state.grid) return;
+    const request = sectionRequest();
+    if (!request) {
+      $("section-status").textContent = "This record lacks the vertical coordinates needed for a cross-section.";
+      return;
+    }
+    const controller = new AbortController(), serial = state.serial;
+    state.sectionAbort = controller;
+    $("section-status").textContent = "Reading cross-section…";
+    const result = await chartResult("cross-section", request, controller.signal);
+    if (!controller.signal.aborted && serial === state.serial) showSectionFrame(result);
+  }
+  function showSectionFrame({data, error}) {
+    if (error) {
+      $("section-status").textContent = error.message + (state.section ? " Showing " + clock(state.section.record) + " UTC." : "");
+      return;
+    }
+    state.section = data;
+    $("section-status").textContent = "";
+    updateSectionControls();
+    renderSection();
+    scheduleDraw();
+  }
+  function lockSectionAxes(plot) {
+    if (plot?.valid && state.playViews && state.playViews.section?.key !== plot.key) {
+      state.playViews.section = {key: plot.key, x: plot.fullX, y: plot.fullY, range: plot.range};
+    }
+  }
+  function renderSection() {
+    const data = state.section;
+    if (!data) return;
+    const variable = data.variable.id, name = NAMES[variable] || data.variable.name;
+    const unit = variable === "t" ? units(variable) : data.variable.units;
+    const offset = convert(0, variable);
+    const key = [data.axis, variable, unit].join("|");
+    const locked = state.playViews?.section?.key === key ? state.playViews.section : null;
+    const plot = plots.crossSection(data, {
+      canvas: $("section-raster"), colours: lut(variable), name,
+      symmetric: ["u", "v"].includes(variable), convert: raw => raw + offset,
+      view: state.sectionView?.axis === data.axis ? state.sectionView : locked, range: locked?.range
+    });
+    plot.key = key;
+    state.sectionPlot = plot;
+    lockSectionAxes(plot);
+    $("section-axes").innerHTML = plot.svg;
+    $("section-reset").disabled = false;
+    $("section-context").textContent = data.record.datetime.slice(0, 10) + " · " + clock(data.record) + " UTC · " + name;
+    $("section-legend").hidden = !plot.valid;
+    $("section-low").textContent = plots.tickLabel(plot.range[0]);
+    $("section-high").textContent = plots.tickLabel(plot.range[1]) + (unit ? " " + unit : "");
+    $("section-gradient").style.background = "linear-gradient(90deg," + palette(variable).map(c => "rgb(" + c.join(",") + ")").join(",") + ")";
+    const dry = data.axis !== "pressure" && !data.record.fields.some(f => f.id === "q");
+    $("section-note").textContent = !plot.valid ? "No represented data along this route." :
+      (dry ? "Dry-air height (q absent). " : "") +
+      (data.axis === "pressure" ? "Brown line shows surface pressure." : "Brown line marks the ground.");
+    bindPlotZoom($("section-axes"), plot, $("section-zoom-axis"), setSectionView, resetSectionZoom);
+  }
+  function setSectionView(x, y) {
+    if (x[1] - x[0] < 1e-8 || y[1] - y[0] < 1e-8) return;
+    state.sectionView = {axis: state.section.axis, x, y};
+    renderSection();
+  }
+  function resetSectionZoom() {
+    stopPlay();
+    state.sectionView = null;
+    renderSection();
   }
   const TRACK_COLOURS=["#123e35","#ac3b34","#3c5599","#814892","#a66916","#247c87"];
   function renderTracks() {
@@ -787,24 +1110,31 @@
     el.textContent=format(convert(raw))+" "+units()+"\n"+coordinateLabel(ll.lat,ll.lng,2);
     el.hidden=false;el.style.left=Math.min(event.containerPoint.x+15,size.x-170)+"px";el.style.top=Math.min(event.containerPoint.y+15,size.y-135)+"px";
   }
-  map.on("move zoom resize",scheduleDraw);map.on("click",e=>selectPoint(e.latlng));map.on("mousemove",hover);
+  map.on("move zoom resize",scheduleDraw);map.on("click", e => {
+    if (state.sectionEditing || e.originalEvent?.ctrlKey || e.originalEvent?.metaKey) addWaypoint(e.latlng);
+    else selectPoint(e.latlng);
+  });map.on("mousemove",hover);
   map.on("mouseout movestart zoomstart",()=>{$("hover-readout").hidden=true;});
   new ResizeObserver(()=>{map.invalidateSize();resize();}).observe($("map"));
-  window.addEventListener("resize",resize);
+  window.addEventListener("resize", () => {
+    if (narrowMap() && !$("point-panel").hidden && !$("section-panel").hidden) closeSectionPanel();
+    resize();
+  });
   $("variable").onchange=()=>{stopPlay();state.variable=$("variable").value;debounceSlice();};
   document.querySelectorAll("[data-field]").forEach(b=>b.onclick=()=>{if(!b.disabled){$("variable").value=b.dataset.field;$("variable").dispatchEvent(new Event("change"));}});
   document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{if(!b.disabled)chooseMode(b.dataset.mode);});
-  $("level").oninput=e=>{stopPlay();setLevel(e.target.value===""?NaN:+e.target.value);};
-  $("level-slider").oninput=e=>{stopPlay();setLevel(+e.target.value);};
+  $("level").oninput = e => setLevel(e.target.value === "" ? NaN : +e.target.value);
+  $("level-slider").oninput = e => setLevel(+e.target.value);
   $("height-reference").onchange=()=>{stopPlay();state.reference=state.preferredReference=$("height-reference").value;remember("heightReference",state.reference);state.profileView=null;configureLayer();debounceSlice();};
   $("temperature-unit").onchange=()=>{
+    stopPlay();
     state.profileView=null;
     if(state.variable==="t") {
       if(state.grid&&$("range-mode").value!=="fixed")updateScale();
       else {const delta=$("temperature-unit").value==="C"?-273.15:273.15;state.scale=state.scale.map(v=>v+delta);}
       $("range-min").value=state.scale[0].toFixed(2);$("range-max").value=state.scale[1].toFixed(2);
     }
-    updateHead();updateLegend();scheduleDraw();renderMetrics();renderProfile();
+    updateHead();updateLegend();scheduleDraw();renderMetrics();renderProfile();renderSection();
   };
   $("date").onchange=()=>loadDay($("date").value);
   $("prev-day").onclick=()=>{const i=state.catalog&&state.catalog.dates.indexOf(state.date);if(i>0)loadDay(state.catalog.dates[i-1]);};
@@ -813,9 +1143,9 @@
   $("available-date").onchange=()=>loadDay($("available-date").value);
   $("time-slider").oninput=e=>changeTime(+e.target.value);
   $("prev-time").onclick=()=>changeTime(state.ti-1);$("next-time").onclick=()=>changeTime(state.ti+1);
-  $("play").onclick=()=>{if(state.playing)stopPlay(true);else startPlay();};
+  $("play").onclick=()=>{if(state.playing)stopPlay();else startPlay();};
   $("opacity").oninput=()=>{$("opacity-label").textContent=$("opacity").value+"%";scheduleDraw();};
-  $("wind-toggle").onchange=()=>{invalidate();loadSlice();};$("grid-toggle").onchange=scheduleDraw;
+  $("wind-toggle").onchange=()=>{stopPlay();invalidate();loadSlice();};$("grid-toggle").onchange=scheduleDraw;
   $("coastline-toggle").checked=stored("coastlines","0")==="1";
   const coastAttribution='<a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a>';
   function coastlineChanged(){remember("coastlines",$("coastline-toggle").checked?"1":"0");map.attributionControl[$("coastline-toggle").checked?"addAttribution":"removeAttribution"](coastAttribution);scheduleDraw();}
@@ -830,11 +1160,22 @@
 
   $("fit-data").onclick=fitData;$("refresh").onclick=()=>connect(true);
   $("sidebar-toggle").onclick=()=>{$("sidebar").classList.toggle("open");setTimeout(()=>map.invalidateSize(),0);};
-  $("point-close").onclick=()=>{$("point-panel").hidden=true;$("point-open").hidden=false;$("colour-legend").classList.remove("panel-visible");};
-  $("point-open").onclick=showPointPanel;
+  $("point-close").onclick=()=>{$("point-panel").hidden=true;updatePanels();};
+  $("point-open").onclick = showPointPanel;
+  $("section-tool").onclick = () => {
+    if (state.sectionEditing) setSectionEditing(false);
+    else { showSectionPanel(); setSectionEditing(true); }
+  };
+  $("section-close").onclick = closeSectionPanel;
+  $("section-undo").onclick = () => changeRoute(state.waypoints.slice(0, -1));
+  $("section-clear").onclick = () => changeRoute([]);
+  $("section-axis").onchange = () => {
+    state.sectionAxis = $("section-axis").value;
+    changeRoute(state.waypoints);
+  };
+  $("section-reset").onclick = resetSectionZoom;
   $("coordinate-toggle").onclick=()=>{state.compassCoordinates=!state.compassCoordinates;remember("compassCoordinates",state.compassCoordinates?"1":"0");updateCoordinates();};
-  $("profile-variable").onchange=$("profile-axis").onchange=()=>{state.profileView=null;renderProfile();};
-  $("profile-reset").onclick=()=>{state.profileView=null;renderProfile();};
+  $("profile-variable").onchange = $("profile-axis").onchange = $("profile-reset").onclick = resetProfileZoom;
   $("notice-close").onclick=()=>{dismissedNotices.add($("notice-text").textContent);$("notice").hidden=true;};
   $("contour-toggle").onchange=scheduleDraw;
   $("map-png").onclick=exportMapPNG;$("profile-png").onclick=exportProfilePNG;
@@ -859,10 +1200,10 @@
     return {data_root,host,port,cache_mb};
   }
   function fillConfigEditor(settings,path) {
-    const defaults={data_root:"/data3/ERA5",host:"127.0.0.1",port:8767,cache_mb:256};
+    const defaults={data_root:"/data3/ERA5",host:"127.0.0.1",port:8768,cache_mb:256};
     const c=Object.assign(defaults,settings);
     $("config-root").value=c.data_root;$("config-host").value=c.host;
-    $("config-port").value=c.port||8767;$("config-cache").value=c.cache_mb;
+    $("config-port").value=c.port||8768;$("config-cache").value=c.cache_mb;
     $("config-path").value=path||stored("configPath","~/era5viewer.json");
     state.configDraft=c;updateConfigPreview();
   }
@@ -927,7 +1268,7 @@
     catch(_){const selection=window.getSelection(),range=document.createRange();range.selectNodeContents($(id));selection.removeAllRanges();selection.addRange(range);$("config-status").textContent="Command selected; copy it using Ctrl+C or ⌘C.";}
   }
   $("config-command-copy").onclick=()=>copyInstruction("config-command");$("config-tunnel-copy").onclick=()=>copyInstruction("config-tunnel");
-  $("layer-netcdf").onclick=e=>{if($("layer-netcdf").classList.contains("disabled"))e.preventDefault();else stopPlay(true);};
+  $("layer-netcdf").onclick=e=>{if($("layer-netcdf").classList.contains("disabled"))e.preventDefault();else stopPlay();};
   function openConnection() {$("api-url").value=state.base;updateReaderConfiguration();$("connection-dialog").showModal();}
   $("connection-open").onclick=openConnection;$("empty-connect").onclick=openConnection;
   $("connection-close").onclick=()=>{$("connection-dialog").close();};

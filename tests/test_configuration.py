@@ -93,7 +93,7 @@ class ConfigurationTests(unittest.TestCase):
                 with urlopen(f"http://{address}/api/config", timeout=5) as response:
                     config = json.load(response)
                 self.assertTrue(config["personal"])
-                self.assertEqual(config["version"], "1.2.0")
+                self.assertEqual(config["version"], "1.3.0")
                 self.assertEqual(config["settings"]["data_root"], str(self.directory / f"archive-{number}"))
                 self.assertEqual(config["settings"]["cache_mb"], 32 * (number + 1))
                 self.assertEqual(config["config_file"], str(self.directory / f"personal-{number}.json"))

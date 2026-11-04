@@ -16,7 +16,7 @@
 <body>
   <header class="topbar">
     <button id="sidebar-toggle" class="icon-button mobile-only" title="Show controls" aria-label="Show controls">☰</button>
-    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">E<span>5</span></span><span>era5<strong>viewer</strong> <span id="app-version" class="app-version">v1.2</span><small>YOUR ATMOSPHERE, EXPLORED</small></span></a>
+    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">E<span>5</span></span><span>era5<strong>viewer</strong> <span id="app-version" class="app-version">v1.3</span><small>YOUR ATMOSPHERE, EXPLORED</small></span></a>
     <div class="header-divider"></div>
     <div class="date-nav"><button id="prev-day" class="icon-button" title="Previous available day" aria-label="Previous available day">‹</button><label class="sr-only" for="date">Date in UTC</label><input id="date" type="date"><button id="next-day" class="icon-button" title="Next available day" aria-label="Next available day">›</button></div>
     <span id="time-label" class="time-label">— UTC</span>
@@ -64,7 +64,7 @@
     </aside>
     <section class="map-area" aria-label="Atmospheric field map">
       <div id="map"></div><canvas id="field-canvas" aria-hidden="true"></canvas><canvas id="overlay-canvas" aria-hidden="true"></canvas>
-      <div class="map-heading"><div><span class="eyebrow">ATMOSPHERIC EXPLORER</span><h2 id="map-field">Temperature</h2><p id="map-context">Connect to your local ERA5 archive</p></div><div class="map-actions"><span id="data-badge" class="map-badge">NETCDF · LOCAL</span><div class="map-export-buttons"><button id="map-png" class="button secondary" disabled title="Export this view, colourbar and labels; exclude the profile">↓ Map PNG</button><a id="layer-netcdf" class="button secondary disabled" href="#" download title="Download this time and layer on the full source grid, with lnsp and available surface z">↓ Layer netCDF</a></div></div></div>
+      <div class="map-heading"><div><span class="eyebrow">ATMOSPHERIC EXPLORER</span><h2 id="map-field">Temperature</h2><p id="map-context">Connect to your local ERA5 archive</p></div><div class="map-actions"><span id="data-badge" class="map-badge">NETCDF · LOCAL</span><div class="map-export-buttons"><button id="map-png" class="button secondary" disabled title="Export this view, colourbar and labels; exclude the profile">↓ Map PNG</button><a id="layer-netcdf" class="button secondary disabled" href="#" download title="Download this time and layer on the full source grid, with lnsp and available surface z">↓ Layer netCDF</a></div><button id="section-tool" class="button secondary" type="button" aria-pressed="false" title="Add waypoints by clicking the map, or use Ctrl-click">Cross-section</button></div></div>
       <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="notice-close" class="icon-button" aria-label="Dismiss message">×</button></div>
       <div id="loading" class="loading" hidden><span class="spinner"></span> Reading atmosphere…</div>
       <div id="empty-state" class="empty-state"><div class="empty-icon">⌁</div><h2>Your archive, on the map.</h2><p id="empty-message">Connecting to the ERA5 reader…</p><button id="empty-connect" class="button" hidden>Connection settings</button></div>
@@ -82,6 +82,22 @@
         <p id="profile-note" class="note"></p><div class="export-row"><a id="profile-export" class="text-button disabled" href="#" download="era5-profile.csv">↓ Profile CSV</a><button id="profile-png" class="text-button" disabled>↓ Profile PNG</button></div>
         <details class="drift-tools"><summary>Trace the wind <span>↗</span></summary><p class="note">Horizontal drift on the selected layer. Daily files are followed automatically, up to 10 days. Tracks stay until cleared.</p><div class="drift-form"><label for="drift-hours">Duration (hours)<input id="drift-hours" type="number" min="0.05" max="240" step="0.25" value="1"></label><button id="drift-run" class="button">Trace drift</button></div><p id="drift-status" class="note" role="status"></p><div id="track-list" class="track-list"></div><div class="export-row"><button id="drift-export" class="text-button" hidden>↓ Selected track CSV</button><button id="drift-clear" class="text-button" hidden>Clear selected</button><button id="drift-clear-all" class="text-button" hidden>Clear all tracks</button></div></details>
       </aside>
+      <aside id="section-panel" class="section-panel" aria-label="Cross-section" hidden>
+        <div class="point-heading"><div><span class="eyebrow">TRANSECT</span><h2>Vertical cross-section</h2></div><button id="section-close" class="icon-button" aria-label="Close cross-section panel">×</button></div>
+        <div class="section-actions"><p id="section-summary" class="note"></p><button id="section-undo" class="text-button" type="button">Undo point</button><button id="section-clear" class="text-button" type="button">Clear route</button></div>
+        <div id="section-status" class="note" role="status"></div>
+        <div id="section-content" hidden>
+          <div class="profile-toolbar">
+            <label for="section-axis">Vertical axis<select id="section-axis"><option value="height_msl">Height MSL</option><option value="height_agl">Height AGL</option><option value="pressure">Pressure</option></select></label>
+            <label for="section-zoom-axis">Zoom<select id="section-zoom-axis"><option value="both">Both axes</option><option value="vertical">Y-axis</option><option value="horizontal">X-axis</option></select></label>
+            <button id="section-reset" class="text-button" type="button">Reset zoom</button>
+          </div>
+          <p id="section-context" class="point-context"></p>
+          <div id="section-chart" class="section-chart"><canvas id="section-raster" width="540" height="286" aria-hidden="true"></canvas><div id="section-axes"></div></div>
+          <div id="section-legend" class="section-legend" hidden><span id="section-low"></span><span id="section-gradient"></span><span id="section-high"></span></div>
+          <p id="section-note" class="note"></p>
+        </div>
+      </aside>
       <footer class="timeline"><div class="timeline-controls"><button id="prev-time" class="icon-button" title="Previous available time" aria-label="Previous available time">‹</button><button id="play" class="play-button" title="Play available times" aria-label="Play available times" disabled>▶</button><button id="next-time" class="icon-button" title="Next available time" aria-label="Next available time">›</button></div><div class="timeline-track"><label class="sr-only" for="time-slider">Available time in UTC</label><input id="time-slider" type="range" min="0" max="0" value="0" step="1" disabled><div id="time-ticks" class="time-ticks"></div></div><div class="timeline-count"><span id="time-count">— times</span><span id="animation-status" role="status"></span></div></footer>
     </section>
   </main>
@@ -89,13 +105,13 @@
     <div class="dialog-heading"><h2>Connect to your ERA5 archive</h2><button id="connection-close" class="icon-button" aria-label="Close connection settings">×</button></div>
     <p>Run a reader under your own account on the machine containing your data. Each user can choose their own configuration and port.</p>
     <p id="active-config" class="active-config">The reader's configuration will appear here when connected.</p>
-    <form id="connection-form"><label for="api-url">Reader address<input id="api-url" type="url" value="http://127.0.0.1:8767" required></label><button class="button" type="submit">Connect</button></form>
+    <form id="connection-form"><label for="api-url">Reader address<input id="api-url" type="url" value="http://127.0.0.1:8768" required></label><button class="button" type="submit">Connect</button></form>
     <details id="personal-config" class="personal-config"><summary>Personal configuration <span>Create or load your own JSON file</span></summary>
       <p>The shared <code>config.json</code> stays unchanged. Edit these settings, download a personal JSON file, then place it at the chosen path on the data machine. “Load JSON” imports a file into this editor.</p>
       <div class="config-grid">
         <label class="config-wide" for="config-path">Personal configuration path on the data machine<input id="config-path" type="text" value="~/era5viewer.json" spellcheck="false"></label>
         <label class="config-wide" for="config-root">ERA5 data directory on the data machine<input id="config-root" type="text" value="/data3/ERA5" spellcheck="false"></label>
-        <label for="config-port">Your reader port<input id="config-port" type="number" min="1024" max="65535" step="1" value="8767"></label>
+        <label for="config-port">Your reader port<input id="config-port" type="number" min="1024" max="65535" step="1" value="8768"></label>
         <label for="config-cache">Reader cache (MiB)<input id="config-cache" type="number" min="16" max="1048576" step="1" value="256"></label>
         <label class="config-wide" for="config-host">Reader bind address<input id="config-host" type="text" value="127.0.0.1" spellcheck="false"></label>
       </div>
@@ -105,8 +121,8 @@
       <details class="config-preview"><summary>JSON preview</summary><pre><code id="config-json"></code></pre></details>
     </details>
     <div class="reader-instructions"><h3>On the data machine</h3><pre><code id="config-command">bash /data1/tim/era5viewer/start.sh</code></pre><button id="config-command-copy" class="text-button" type="button">Copy command</button>
-      <h3>On your computer, for a remote data machine</h3><pre><code id="config-tunnel">ssh -N -L 8767:127.0.0.1:8767 user@data-machine</code></pre><button id="config-tunnel-copy" class="text-button" type="button">Copy tunnel command</button>
-      <p class="note">Run the SSH command in a terminal and leave it open. After starting this personal reader, connect to <strong id="config-address">http://127.0.0.1:8767</strong> using the address box above. Loading or downloading JSON prepares settings; it does not reconfigure a running reader.</p>
+      <h3>On your computer, for a remote data machine</h3><pre><code id="config-tunnel">ssh -N -L 8768:127.0.0.1:8768 user@data-machine</code></pre><button id="config-tunnel-copy" class="text-button" type="button">Copy tunnel command</button>
+      <p class="note">Run the SSH command in a terminal and leave it open. After starting this personal reader, connect to <strong id="config-address">http://127.0.0.1:8768</strong> using the address box above. Loading or downloading JSON prepares settings; it does not reconfigure a running reader.</p>
     </div>
   </dialog>
 </body>

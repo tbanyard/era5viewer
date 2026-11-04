@@ -19,6 +19,7 @@ from .data import Archive, DataError
 from .configuration import parse_settings
 from .export import layer_netcdf
 from .trajectory import trace
+from .section import cross_section
 from . import __version__
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -115,6 +116,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(self.archive.catalog())
             if route == "/api/day":
                 return self.respond(self.archive.day(query.get("date", [""])[0]))
+            if route == "/api/cross-section":
+                args = parameters(query)
+                points = json.loads(query.get("points", ["[]"])[0])
+                result, values = cross_section(self.archive, args["fid"], args["index"], args["variable"],
+                                               query.get("axis", ["height_msl"])[0], points)
+                result["encoding"] = "base64-float32-le"
+                result["values"] = encode_array(values)
+                return self.respond(result)
             if route in ("/api/slice", "/api/profile", "/api/export/slice", "/api/export/layer.nc", "/api/export/profile", "/api/drift"):
                 args = parameters(query)
                 if route == "/api/export/layer.nc":
@@ -201,7 +210,7 @@ def main(argv=None):
     try:
         server = ThreadingHTTPServer((args.host, args.port), handler)
     except OSError as exc:
-        print(f"Cannot start era5viewer: {exc}. Try --port 8768.", file=sys.stderr)
+        print(f"Cannot start era5viewer: {exc}. Try --port with a free port, for example 8769.", file=sys.stderr)
         return 1
     server.daemon_threads = True
     print(f"\nera5viewer {__version__}  •  {archive.catalog()['engine']}", flush=True)

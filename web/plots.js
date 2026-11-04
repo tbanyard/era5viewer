@@ -26,7 +26,7 @@
     const points=values.map((v,i)=>({x:finite(v)?o.convert(v):NaN,y:coordinate[i],index:i})),valid=points.filter(v=>finite(v.x)&&finite(v.y));if(valid.length<2)return null;
     const xs=valid.map(v=>v.x),ys=valid.map(v=>v.y),xmin=Math.min(...xs),xmax=Math.max(...xs),pad=Math.max((xmax-xmin)*.06,.5),fullX=niceExtent(xmin-pad,xmax+pad,5);
     let fullY;if(axis==="height")fullY=niceExtent(Math.min(0,...ys),Math.max(...ys),8);else if(axis==="pressure")fullY=[-Math.log10(Math.ceil(10**(-Math.min(...ys))/100)*100),Math.ceil(Math.max(...ys)-1e-8)];else fullY=niceExtent(Math.min(...ys),Math.max(...ys),7);
-    const key=[axis,variable,o.reference,o.unit].join("|"),view=o.view?.key===key?o.view:null,xd=view?view.x:fullX,yd=view?view.y:fullY;
+    const key=[axis,variable,o.reference,o.unit].join("|"),view=[o.view,o.fallbackView].find(v=>v?.key===key),xd=view?view.x:fullX,yd=view?view.y:fullY;
     const width=360,heightPx=260,left=48,right=300,top=30,bottom=216,x=v=>left+(v-xd[0])/(xd[1]-xd[0])*(right-left),y=v=>bottom-(v-yd[0])/(yd[1]-yd[0])*(bottom-top),inverseX=v=>xd[0]+(v-left)/(right-left)*(xd[1]-xd[0]),inverseY=v=>yd[0]+(bottom-v)/(bottom-top)*(yd[1]-yd[0]);
     let ticks=axis==="pressure"?PRESSURES.map(v=>({label:tickLabel(v),coordinate:-Math.log10(v)})):niceTicks(yd[0],yd[1],axis==="height"?8:7).map(v=>({label:tickLabel(axis==="model"?-v:v),coordinate:v}));ticks=spacedTicks(ticks,y,top,bottom,axis==="pressure"?18:16);
     let secondary=[],secondaryLabel="";
@@ -46,6 +46,106 @@
     svg+='<path clip-path="url(#profile-clip)" d="'+path+'" fill="none" stroke="#087f75" stroke-width="2.2" stroke-linejoin="round"/></g></svg>';
     return {svg,key,axis,x:xd,y:yd,fullX,fullY,left,right,top,bottom,width,height:heightPx,inverseX,inverseY,primaryTicks:ticks,secondaryTicks:secondary,xTicks:xticks};
   }
+  function crossSection(data, o) {
+    const pressure = data.axis === "pressure";
+    const coordinate = value => pressure ? -Math.log10(value) : value;
+    const {distance_km: distances, vertical, surface, values, waypoints, shape: [rows, cols]} = data;
+    const minY = coordinate(vertical[0]), maxY = coordinate(vertical[rows - 1]);
+    const fullX = [0, distances[cols - 1]];
+    let low = Infinity, high = -Infinity, representedTop = minY;
+    for (let i = 0; i < values.length; i++) {
+      if (!finite(values[i])) continue;
+      low = Math.min(low, o.convert(values[i]));
+      high = Math.max(high, o.convert(values[i]));
+      representedTop = coordinate(vertical[Math.floor(i / cols)]);
+    }
+    const terrain = surface.filter(finite).map(coordinate);
+    const base = pressure ? Math.min(-3, ...terrain) : Math.min(0, ...terrain);
+    const fullY = pressure
+      ? [Math.max(minY, base), Math.min(maxY, Math.max(-2, Math.ceil(representedTop)))]
+      : niceExtent(Math.max(minY, base), Math.max(base + 1, representedTop), 7);
+    if (o.symmetric && finite(low)) high = Math.max(1, -low, high), low = -high;
+    const range = o.range || niceExtent(low, high, 6);
+    const xd = o.view?.x || fullX, yd = o.view?.y || fullY;
+    const width = 540, height = 286, left = 56, right = 520, top = 59, bottom = 244;
+    const x = v => left + (v - xd[0]) / (xd[1] - xd[0]) * (right - left);
+    const y = v => bottom - (v - yd[0]) / (yd[1] - yd[0]) * (bottom - top);
+    const inverseX = v => xd[0] + (v - left) / (right - left) * (xd[1] - xd[0]);
+    const inverseY = v => yd[0] + (bottom - v) / (bottom - top) * (yd[1] - yd[0]);
+    const axisLabel = pressure ? "Pressure (hPa, log)" : "Geopotential height (km " + (data.axis === "height_msl" ? "MSL" : "AGL") + ")";
+    let svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 540 286" tabindex="0" role="img" aria-label="' +
+      escape(o.name + " cross-section, " + axisLabel + " against distance") +
+      '"><defs><clipPath id="section-clip"><rect x="56" y="59" width="464" height="185"/></clipPath></defs>' +
+      '<g font-family="sans-serif" font-size="11" fill="#465f56"><text x="56" y="15">' + escape(axisLabel) + '</text>';
+    const ticks = pressure
+      ? PRESSURES.map(p => ({label: tickLabel(p), coordinate: coordinate(p)}))
+      : niceTicks(...yd, 6).map(v => ({label: tickLabel(v), coordinate: v}));
+    for (const tick of spacedTicks(ticks, y, top, bottom)) {
+      const py = y(tick.coordinate);
+      svg += '<path d="M51,' + py + 'H520" stroke="#a4b4ac" stroke-opacity=".46"/>' +
+        '<text x="47" y="' + (py + 4) + '" text-anchor="end">' + tick.label + '</text>';
+    }
+    for (const distance of niceTicks(...xd, 6)) {
+      const px = x(distance);
+      svg += '<path d="M' + px + ',59V249" stroke="#a4b4ac" stroke-opacity=".38"/>' +
+        '<text x="' + px + '" y="262" text-anchor="middle">' + tickLabel(distance) + '</text>';
+    }
+    let line = [], ground = "";
+    function finishGround() {
+      if (line.length > 1) {
+        const trace = line.map(p => p.join(",")).join(" L");
+        ground += '<path d="M' + trace + ' L' + line.at(-1)[0] + ',244 H' + line[0][0] +
+          'Z" fill="#d8cbbb"/><path class="section-terrain" d="M' + trace + '" fill="none" stroke="#755944" stroke-width="1.5"/>';
+      }
+      line = [];
+    }
+    surface.forEach((v, i) => {
+      if (finite(v)) line.push([x(distances[i]).toFixed(2), y(coordinate(v)).toFixed(2)]);
+      else finishGround();
+    });
+    finishGround();
+    svg += '<g clip-path="url(#section-clip)">' + ground + '</g>';
+    const labelRows = [-Infinity, -Infinity, -Infinity];
+    waypoints.forEach((index, i) => {
+      const px = x(distances[index]);
+      if (px < left - 1e-5 || px > right + 1e-5) return;
+      const row = labelRows.findIndex(last => px - last >= 14);
+      if (row >= 0) labelRows[row] = px;
+      const label = String.fromCharCode(65 + i);
+      svg += '<g class="section-waypoint" data-distance="' + distances[index] + '"><title>' + label + ' · ' +
+        tickLabel(distances[index]) + ' km</title><path d="M' + px + ',59V244" stroke="#244f46" stroke-dasharray="4 3"/>' +
+        '<text x="' + px + '" y="' + (row < 0 ? 52 : 52 - 12 * row) + '" text-anchor="middle" font-weight="bold">' + label + '</text></g>';
+    });
+    svg += '<rect x="56" y="59" width="464" height="185" fill="none" stroke="#94a89d"/>' +
+      '<text x="288" y="281" text-anchor="middle">Distance along route (km)</text></g></svg>';
+
+    const c = o.canvas.getContext("2d"), w = right - left, h = bottom - top;
+    const pixels = c.createImageData(w, h);
+    const columns = new Int16Array(w).fill(-1);
+    for (let px = 0, j = 0; px < w; px++) {
+      const distance = inverseX(left + px + .5);
+      if (distance < 0 || distance > fullX[1]) continue;
+      while (j + 1 < cols && distance > (distances[j] + distances[j + 1]) / 2) j++;
+      columns[px] = j;
+    }
+    for (let py = 0; py < h; py++) {
+      const v = inverseY(top + py + .5);
+      if (v < minY || v > maxY) continue;
+      const row = Math.round((v - minY) / (maxY - minY) * (rows - 1)) * cols;
+      for (let px = 0; px < w; px++) {
+        if (columns[px] < 0) continue;
+        const raw = values[row + columns[px]];
+        if (!finite(raw)) continue;
+        const colour = o.colours[Math.max(0, Math.min(255, Math.round((o.convert(raw) - range[0]) / (range[1] - range[0]) * 255)))];
+        const i = (py * w + px) * 4;
+        pixels.data[i] = colour[0]; pixels.data[i + 1] = colour[1]; pixels.data[i + 2] = colour[2]; pixels.data[i + 3] = 255;
+      }
+    }
+    c.clearRect(0, 0, width, height);
+    c.putImageData(pixels, left, top);
+    return {svg, x: xd, y: yd, fullX, fullY, range, valid: finite(low), left, right, top, bottom, width, height, inverseX, inverseY};
+  }
+
   function joinSegments(segments){
     const key=p=>p[0].toFixed(4)+","+p[1].toFixed(4),nodes=new Map(),used=new Set(),paths=[];segments.forEach((s,i)=>s.forEach(p=>{const k=key(p);if(!nodes.has(k))nodes.set(k,[]);nodes.get(k).push(i);}));
     function grow(path,forward){while(true){const point=forward?path[path.length-1]:path[0],k=key(point),next=(nodes.get(k)||[]).find(i=>!used.has(i));if(next===undefined)break;used.add(next);const seg=segments[next],other=key(seg[0])===k?seg[1]:seg[0];if(forward)path.push(other);else path.unshift(other);}}
@@ -60,5 +160,5 @@
       if(cross.length===2)segments.push(cross);else if(cross.length===4){const centre=values.reduce((a,b)=>a+b)/4;if((values[0]>=level)===(centre>=level))segments.push([cross[0],cross[1]],[cross[2],cross[3]]);else segments.push([cross[0],cross[3]],[cross[1],cross[2]]);}
     }return {level,paths:joinSegments(segments)};});
   }
-  window.ERA5Plots={niceStep,niceTicks,niceExtent,tickLabel,quantile,profile,contours,interpolateAxis,escape};
+  window.ERA5Plots={niceStep,niceTicks,niceExtent,tickLabel,quantile,profile,crossSection,contours,interpolateAxis,escape};
 })();

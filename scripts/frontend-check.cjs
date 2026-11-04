@@ -24,11 +24,14 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   });
   const w=dom.window,$=id=>w.document.getElementById(id);
   const requests=[],downloads=[],blobs=[],labels=[];
+  let fetchGate;
   w.fetch=(u,options={})=>{
    requests.push(String(u));
    const c=new AbortController();
    if(options.signal){if(options.signal.aborted)c.abort();else options.signal.addEventListener("abort",()=>c.abort(),{once:true});}
-   return fetch(u,Object.assign({},options,{signal:c.signal}));
+   const response = fetch(u, Object.assign({}, options, {signal: c.signal}));
+   if (fetchGate?.matches(new URL(u))) return Promise.all([response, fetchGate.promise]).then(([result]) => result);
+   return response;
   };
   w.Image=class extends Image { set src(value){super.src=typeof value==="string"&&value.startsWith("data:image/svg+xml;base64,")?Buffer.from(value.split(",")[1],"base64"):value;} get src(){return super.src;} };
   w.URL.createObjectURL=blob=>{blobs.push(blob);return "blob:test-export";};w.URL.revokeObjectURL=()=>{};
@@ -68,7 +71,7 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   assert.equal($("time-label").textContent,"12:00 UTC");assert.equal(state.times.length,8);
   assert.equal($("date").value,"2016-09-26");
   assert.equal(state.reference,"msl");assert.equal($("height-reference").options[1].disabled,false);
-  assert.equal($("app-version").textContent,"v1.2");
+  assert.equal($("app-version").textContent,"v1.3");
   assert.equal(w.document.querySelector('[data-field="wind_speed"]').textContent,"Wind speed");
   assert.ok(w.ERA5Coastlines.lines.length>1000);
   assert.equal($("layer-netcdf").classList.contains("disabled"),false);
@@ -155,11 +158,71 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   $("next-time").click();await until(()=>state.grid?.record.datetime.includes("T15:00"),"next real time");
   assert.equal(state.tracks.length,1);assert.equal($("drift-export").hidden,false);
   await until(()=>state.profile?.record.datetime.includes("T15:00"),"profile refresh");
-  $("play").click();await until(()=>state.grid?.record.datetime.includes("T18:00"),"animation");$("play").click();assert.equal(state.playing,false);
-  await until(()=>state.frameCache.items.size>=8,"prefetched animation frames");
+  const mapClick = (lat, lng, ctrlKey = false) => w.era5viewer.map.fire("click", {latlng: {lat, lng}, originalEvent: {ctrlKey}});
+  mapClick(28, -16, true);
+  assert.equal(state.waypoints.length, 1);
+  $("section-tool").click();
+  mapClick(32, -4);
+  mapClick(46, -14);
+  await until(() => state.section?.waypoints.length === 3, "height cross-section along three waypoints");
+  assert.equal(state.section.axis, "height_msl");
+  const distances = state.section.waypoints.map(index => state.section.distance_km[index]);
+  assert.equal(distances[0], 0);
+  assert.ok(Math.abs(distances[2] - 2 * distances[1]) > 100, "unequal legs must stay unequal");
+  assert.equal($("section-axes").querySelectorAll(".section-waypoint").length, 3);
+  assert.ok($("section-axes").querySelector(".section-terrain"));
+  const transect = createCanvas(540, 286), preview = transect.getContext("2d");
+  preview.fillStyle = "white";
+  preview.fillRect(0, 0, 540, 286);
+  preview.drawImage($("section-raster")._native, 0, 0);
+  const axesImage = new Image();
+  axesImage.src = Buffer.from($("section-axes").innerHTML);
+  await axesImage.decode();
+  preview.drawImage(axesImage, 0, 0);
+  fs.writeFileSync(path.join(out, "section-height.png"), transect.toBuffer("image/png"));
+  change("section-axis", "pressure");
+  await until(() => state.section?.axis === "pressure", "pressure cross-section");
+  assert.ok($("section-axes").querySelector(".section-terrain"));
+  $("section-axes").querySelector("svg").dispatchEvent(new w.WheelEvent("wheel", {clientX: 155, clientY: 105, deltaY: -120, cancelable: true}));
+  assert.ok(state.sectionView, "cross-section wheel zoom");
+  change("profile-variable", "wind_speed");
+  const plot = state.profilePlot;
+  w.era5viewer.setProfileView(plot.x, [plot.y[0], (plot.y[0] + plot.y[1]) / 2]);
+  const axes = () => JSON.stringify([state.profilePlot.x, state.profilePlot.y, state.sectionPlot.x, state.sectionPlot.y, state.sectionPlot.range]);
+  const zoomed = axes();
+  const displayed = state.grid.record.datetime;
+  const timesMatch = () => state.profile.record.datetime === state.grid.record.datetime &&
+    state.section.record.datetime === state.grid.record.datetime;
+  let release;
+  fetchGate = {matches: u => u.pathname === "/api/cross-section" && u.searchParams.get("index") === "6",
+    promise: new Promise(resolve => { release = resolve; })};
+  $("play").click();
+  await until(() => $("animation-status").textContent.includes("Waiting for 18:00"), "prefetch waits for the section");
+  assert.ok(timesMatch());
+  assert.equal(state.grid.record.datetime, displayed);
+  assert.ok($("profile-chart").querySelector("svg"));
+  assert.ok($("section-axes").querySelector("svg"));
+  $("play").click();
+  release();
+  fetchGate = null;
+  await pause(100);
+  assert.ok(timesMatch());
+  assert.equal(state.grid.record.datetime, displayed, "pause during loading must keep the displayed time");
+  $("play").click();
+  await until(() => state.grid?.record.datetime.includes("T18:00"), "synchronized animation");
+  assert.ok(timesMatch());
+  assert.equal($("profile-variable").value, "wind_speed");
+  assert.equal(axes(), zoomed);
+  await until(()=>state.frameCache.items.size>=8,"rolling animation cache");
+  $("play").click();assert.equal(state.playing,false);
   const before=requests.filter(u=>u.includes("/api/slice?")).length;
   await w.era5viewer.changeTime(4);await w.era5viewer.changeTime(5);
   assert.equal(requests.filter(u=>u.includes("/api/slice?")).length,before,"cached time changes should not re-read slices");
+  $("section-undo").click();
+  await until(() => state.section?.waypoints.length === 2, "undo waypoint");
+  $("section-clear").click();
+  assert.equal(state.section, null);
+  assert.equal(state.waypoints.length, 0);
   assert.ok(state.frameCache.bytes<=state.frameCache.limit);
   $("prev-day").click();await until(()=>state.grid?.record.datetime.startsWith("2016-09-25"),"previous real day");
   $("drift-hours").value=30;$("drift-run").click();await until(()=>state.tracks.length===2,"cross-day drift");
@@ -190,7 +253,7 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   edit("config-port",-1);assert.equal($("config-download").disabled,true);assert.match($("config-status").textContent,/port/);
   edit("config-port",8899);$("connection-close").click();
   assert.deepEqual(errors,[]);
-  console.log("Frontend DOM and canvas checks: PASS (v1.2 NetCDF, offline coastlines, compass coordinates, ERA5 PNG titles, personal JSON import/download, read-only configuration, plus all v1.1 checks)");
+  console.log("Frontend DOM and canvas checks: PASS (v1.3 transects and synchronized playback, NetCDF, offline coastlines, compass coordinates, ERA5 PNG titles, personal JSON import/download, read-only configuration, plus all v1.1 checks)");
  }finally{
   if(dom){dom.window.era5viewer?.dispose();dom.window.close();}
   if(server)server.kill();fs.rmSync(data,{recursive:true,force:true});

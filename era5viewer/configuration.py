@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 
-DEFAULTS = {"data_root": "/data3/ERA5", "host": "127.0.0.1", "port": 8767, "cache_mb": 256}
+DEFAULTS = {"data_root": "/data3/ERA5", "host": "127.0.0.1", "port": 8768, "cache_mb": 256}
 
 
 def read_config(path):

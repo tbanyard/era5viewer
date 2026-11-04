@@ -386,36 +386,45 @@ class Archive:
                 cube = self.cache.get((fid, meta["stamp"], index, name, None))
                 if cube is not None:
                     return cube[int(np.flatnonzero(meta["levels"] == layer)[0])]
-            timedim, leveldim, latdim, londim = meta["dims"]
             with open_nc(meta["path"]) as nc:
-                if name not in nc.variables:
-                    raise DataError(f"Variable {name!r} is absent.")
-                var = nc.variables[name]
-                selection, remaining = [], []
-                for dim, size in zip(var.dimensions, var.shape):
-                    if dim == timedim:
-                        selection.append(index)
-                    elif dim == leveldim and layer is not None:
-                        matches = np.flatnonzero(meta["levels"] == layer)
-                        if not len(matches):
-                            raise DataError(f"Model level {layer} is absent from this file.")
-                        selection.append(int(meta["li"][matches[0]]))
-                    elif dim in (leveldim, latdim, londim):
-                        selection.append(slice(None))
-                        remaining.append(dim)
-                    elif size == 1:
-                        selection.append(0)
-                    else:
-                        raise DataError(f"Variable {name} has unsupported dimension {dim}.")
-                arr = decode(var, tuple(selection))
-                order = [remaining.index(d) for d in (leveldim, latdim, londim) if d in remaining]
-                if latdim not in remaining or londim not in remaining:
-                    raise DataError(f"{name} must have latitude and longitude dimensions.")
-                arr = np.transpose(arr, order)
-                if leveldim in remaining:
-                    arr = arr[meta["li"]]
-                arr = np.take(np.take(arr, meta["yi"], axis=-2), meta["xi"], axis=-1).astype("float32")
-            return self.cache.put(key, arr)
+                arr = self.read_window(nc, meta, index, name, layer)
+                arr = np.take(np.take(arr, meta["yi"], axis=-2), meta["xi"], axis=-1)
+            return self.cache.put(key, arr.astype("float32"))
+
+    @staticmethod
+    def read_window(nc, meta, index, name, layer=None, window=(slice(None), slice(None))):
+        """Read a source-index window and order it as (level,) latitude, longitude."""
+        timedim, leveldim, latdim, londim = meta["dims"]
+        if name not in nc.variables:
+            raise DataError(f"Variable {name!r} is absent.")
+        var = nc.variables[name]
+        selection, remaining = [], []
+        for dim, size in zip(var.dimensions, var.shape):
+            if dim == timedim:
+                selection.append(index)
+            elif dim == leveldim and layer is not None:
+                matches = np.flatnonzero(meta["levels"] == layer)
+                if not len(matches):
+                    raise DataError(f"Model level {layer} is absent from this file.")
+                selection.append(int(meta["li"][matches[0]]))
+            elif dim in (latdim, londim):
+                selection.append(window[dim == londim])
+                remaining.append(dim)
+            elif dim == leveldim:
+                selection.append(slice(None))
+                remaining.append(dim)
+            elif size == 1:
+                selection.append(0)
+            else:
+                raise DataError(f"Variable {name} has unsupported dimension {dim}.")
+        arr = decode(var, tuple(selection))
+        order = [remaining.index(d) for d in (leveldim, latdim, londim) if d in remaining]
+        if latdim not in remaining or londim not in remaining:
+            raise DataError(f"{name} must have latitude and longitude dimensions.")
+        arr = np.transpose(arr, order)
+        if leveldim in remaining:
+            arr = arr[meta["li"]]
+        return arr
 
     def pressure(self, fid, index):
         with self.lock:

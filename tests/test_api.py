@@ -56,6 +56,21 @@ class ApiTests(unittest.TestCase):
         status,headers,body=self.get("/api/profile",dict(self.args,lat=0,lon=-45))
         self.assertEqual(status,200);self.assertEqual(len(json.loads(body)["levels"]),137)
 
+    def test_cross_section_endpoint_returns_binary_samples_and_validates_waypoints(self):
+        args = dict(self.args, axis="pressure", points=json.dumps([[0, 179], [0, -177], [6, -177]]))
+        status, headers, body = self.get("/api/cross-section", args)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "null")
+        result = json.loads(body)
+        self.assertEqual(result["record"]["datetime"], "2016-09-25T03:00:00Z")
+        self.assertEqual(result["encoding"], "base64-float32-le")
+        values = np.frombuffer(base64.b64decode(result["values"]), dtype="<f4").reshape(result["shape"])
+        self.assertEqual(len(result["waypoints"]), 3)
+        self.assertGreater(np.isfinite(values).sum(), 0)
+        np.testing.assert_allclose(values[np.isfinite(values)], 250, atol=.002)
+        self.assertEqual(self.get("/api/cross-section", dict(args, points="invalid"))[0], 400)
+        self.assertEqual(self.get("/api/cross-section", dict(args, points="[[0,0]]"))[0], 400)
+
     def test_missing_values_are_json_null_and_csv_blanks(self):
         args=dict(self.args,index=0,mode="model",value=100,lat=0,lon=180)
         status,headers,body=self.get("/api/profile",args)
@@ -94,7 +109,7 @@ class ApiTests(unittest.TestCase):
         status,headers,body=self.get("/api/config")
         self.assertEqual(status,200)
         info=json.loads(body)
-        self.assertEqual(info["version"],"1.2.0")
+        self.assertEqual(info["version"],"1.3.0")
         self.assertEqual(info["settings"]["data_root"],str(self.archive.root))
         self.assertEqual(info["settings"]["port"],self.server.server_port)
         self.assertEqual(info["settings"]["cache_mb"],16)

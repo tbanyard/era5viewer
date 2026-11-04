@@ -46,7 +46,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(await page.locator("#time-label").textContent(),"12:00 UTC");
     assert.equal(await page.locator("#date").inputValue(),"2016-09-26");
     assert.equal(await page.locator("#time-slider").getAttribute("max"),"7");
-    assert.equal(await page.locator("#app-version").textContent(),"v1.2");
+    assert.equal(await page.locator("#app-version").textContent(),"v1.3");
     assert.equal(await page.locator('[data-field="wind_speed"]').textContent(),"Wind speed");
     await page.locator("#basemap-toggle").uncheck();
     await page.locator("#coastline-toggle").check();

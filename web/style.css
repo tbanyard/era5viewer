@@ -21,3 +21,23 @@ dialog{width:min(480px,calc(100vw - 28px));border:1px solid var(--line);border-r
 @media(max-width:1000px){.brand{min-width:218px}.coordinate-row h2{font-size:13px}.coordinate-toggle{font-size:8px;padding:3px}}
 @media(max-width:760px){.brand{min-width:auto}.map-heading>div:first-child{max-width:calc(100% - 139px)}.map-export-buttons{gap:4px}.map-export-buttons .button{font-size:8px;padding:5px 6px}.map-heading h2{font-size:19px}.coordinate-row h2{font-size:14px}}
 @media(max-width:480px){.topbar{padding:0 8px;gap:5px}.brand{font-size:16px;gap:5px}.brand-mark{width:26px;height:29px}.brand .app-version{font-size:9px}.date-nav{gap:1px}.date-nav input{width:96px;font-size:10px}.date-nav .icon-button{width:19px}.topbar>.icon-button{width:27px}.header-right .connection-button{padding:5px}.map-heading h2{font-size:17px}.map-heading p{font-size:9px}.map-heading>div:first-child{max-width:calc(100% - 127px)}.map-export-buttons .button{padding:5px}.config-actions .text-button{width:100%;text-align:left}.coordinate-row{gap:4px}.coordinate-row h2{font-size:13px}}
+
+/* The transect stays above the timeline, alongside the point panel when space permits. */
+#section-tool[aria-pressed="true"]{background:#dff4eb;border-color:#84b9a9;color:#0b5d50}
+#map.section-editing{cursor:crosshair}
+.section-panel{position:absolute;z-index:790;left:20px;bottom:101px;width:min(570px,calc(100% - 40px));max-height:calc(100% - 232px);overflow:auto;padding:14px 16px;background:#fffffff9;border:1px solid white;border-radius:11px;box-shadow:0 8px 40px #102b3028}
+.section-panel .note{font-size:10px;margin:4px 0}
+.section-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0}
+.section-actions .note{flex:1 1 165px}
+.section-actions .text-button{font-size:10px}
+.section-actions button:disabled{opacity:.45}
+.section-panel .point-context{margin:6px 0}
+.section-chart{position:relative;aspect-ratio:540/286;background:white;touch-action:none}
+.section-chart canvas,.section-chart svg{display:block;position:absolute;inset:0;width:100%;height:100%;touch-action:none;user-select:none}
+.section-chart svg:focus-visible{outline:2px solid var(--accent)}
+.section-legend{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--muted);margin:5px 0}
+#section-gradient{flex:1;height:7px;border-radius:3px}
+.colour-legend.section-visible{bottom:auto;top:176px}
+@media(min-width:901px){.map-area.both-plots .section-panel{width:min(570px,calc(100% - 396px))}}
+@media(max-width:1000px) and (min-width:901px){.map-area.both-plots .section-panel{width:min(570px,calc(100% - 326px))}}
+@media(max-width:900px){.section-panel{left:12px;bottom:91px;width:min(520px,calc(100% - 24px));max-height:calc(100% - 209px);padding:11px}.colour-legend.section-visible{display:none}}
