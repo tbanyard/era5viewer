@@ -1,0 +1,77 @@
+name: Build ERA5Viewer Connect
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_fingerprint:
+        description: "Verified public SHA256 SSH host fingerprint(s), space/comma separated; never a password"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows-x64
+            runner: windows-2022
+          - name: macOS-Intel
+            runner: macos-15-intel
+          - name: macOS-Apple-Silicon
+            runner: macos-15
+          - name: Linux-x64
+            runner: ubuntu-22.04
+          - name: Linux-arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Linux desktop build support
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk tk-dev xvfb
+      - name: Install build dependencies
+        run: python -m pip install -r launcher/requirements-build.txt
+      - name: Run connection tests
+        run: python -m unittest discover -s launcher/tests -v
+      - name: Build native application with pinned server identity
+        env:
+          SSH_HOST_FINGERPRINT: ${{ inputs.server_fingerprint }}
+        run: python launcher/build.py --fingerprint-from-env
+      - name: Check bundled configuration
+        if: runner.os == 'Windows'
+        run: |
+          $app = Start-Process -FilePath launcher/dist/ERA5ViewerConnect/ERA5ViewerConnect.exe -ArgumentList '--check-config' -Wait -PassThru
+          if ($app.ExitCode -ne 0) { throw 'Bundled configuration check failed' }
+      - name: Check Mac bundle and GUI
+        if: runner.os == 'macOS'
+        run: |
+          launcher/dist/ERA5ViewerConnect.app/Contents/MacOS/ERA5ViewerConnect --check-config
+          launcher/dist/ERA5ViewerConnect.app/Contents/MacOS/ERA5ViewerConnect --check-gui
+      - name: Check Linux bundle and GUI
+        if: runner.os == 'Linux'
+        run: |
+          launcher/dist/ERA5ViewerConnect/ERA5ViewerConnect --check-config
+          xvfb-run -a launcher/dist/ERA5ViewerConnect/ERA5ViewerConnect --check-gui
+      - name: Check Windows GUI
+        if: runner.os == 'Windows'
+        run: |
+          $app = Start-Process -FilePath launcher/dist/ERA5ViewerConnect/ERA5ViewerConnect.exe -ArgumentList '--check-gui' -Wait -PassThru
+          if ($app.ExitCode -ne 0) { throw 'Bundled GUI check failed' }
+      - name: Upload native download and checksum
+        uses: actions/upload-artifact@v6
+        with:
+          name: ERA5ViewerConnect-${{ matrix.name }}
+          path: launcher/release/*
+          if-no-files-found: error
+          retention-days: 30

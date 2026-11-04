@@ -1,0 +1,7 @@
+{
+  "ssh_host": "eepc-0184.bath.ac.uk",
+  "ssh_port": 22,
+  "reader_port": 8769,
+  "local_port": 8769,
+  "ssh_host_fingerprints": []
+}

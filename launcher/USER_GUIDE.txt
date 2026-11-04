@@ -1,0 +1,29 @@
+ERA5Viewer Connect
+
+1. Connect to the University of Bath VPN in your usual way if off campus.
+   Complete the normal university MFA step there.
+2. Extract the download for your operating system. Keep all its files together.
+3. Open ERA5ViewerConnect.exe (Windows), ERA5ViewerConnect.app (Mac), or
+   ERA5ViewerConnect (Linux).
+4. Enter your Bath username and password, then choose Connect and open viewer.
+5. Keep the launcher open while using the browser. Closing it or choosing
+   Disconnect closes the connection.
+
+The launcher normally opens http://127.0.0.1:8769/ (localhost). If that port is
+already occupied, it picks a free local port and opens that address instead.
+
+Your account must have SSH access to eepc-0184.bath.ac.uk. The ERA5 reader must
+already be running on that computer. Contact the maintainer if SSH login works
+but the reader is unavailable. This launcher does not install or start the
+reader on the remote computer.
+
+Passwords are never saved. The VPN signs in through the university's normal
+VPN/MFA interface; this app only handles the SSH connection. Additional SSH
+sign-in questions, if the server requires them, appear in separate dialogs.
+
+If Windows, macOS or a managed university device blocks this app, ask the
+maintainer or Bath IT for an approved/signed build. Do not change device
+security settings to work around an unexpected block.
+
+VPN help: https://www.bath.ac.uk/guides/setting-up-vpn-on-your-device/
+Source and rebuild instructions: https://github.com/tbanyard/era5viewer
