@@ -22,7 +22,7 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   dom=new JSDOM(fs.readFileSync(path.join(root,"index.html"),"utf8"),{
    url:base+"/",runScripts:"outside-only",pretendToBeVisual:true,virtualConsole:vc
   });
-  const w=dom.window,$=id=>w.document.getElementById(id);
+  const w=dom.window,$=id=>w.era5viewer?.windows?.get(id)||w.document.getElementById(id);
   const requests=[],downloads=[],blobs=[],labels=[];
   let fetchGate;
   w.fetch=(u,options={})=>{
@@ -41,8 +41,11 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   w.SVGSVGElement.prototype.createSVGRect=()=>({});
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(){this.open=false;};
-  Object.defineProperty(w.HTMLElement.prototype,"clientWidth",{get(){return this.id==="map"?1148:this.id==="time-ticks"?750:300;}});
-  Object.defineProperty(w.HTMLElement.prototype,"clientHeight",{get(){return this.id==="map"?922:30;}});
+  Object.defineProperty(w.HTMLElement.prototype,"clientWidth",{get(){return this.id==="map"||this.classList.contains("map-area")?1148:this.classList.contains("plot-window")?parseFloat(this.style.width)||380:this.id==="time-ticks"?750:300;}});
+  Object.defineProperty(w.HTMLElement.prototype,"clientHeight",{get(){return this.id==="map"||this.classList.contains("map-area")?922:this.classList.contains("plot-window")?parseFloat(this.style.height)||650:30;}});
+  Object.defineProperty(w.HTMLElement.prototype,"offsetWidth",{get(){return this.clientWidth;}});
+  Object.defineProperty(w.HTMLElement.prototype,"offsetHeight",{get(){return this.clientHeight;}});
+  w.HTMLElement.prototype.setPointerCapture=()=>{};
   w.HTMLElement.prototype.getBoundingClientRect=function(){return{width:this.clientWidth,height:this.clientHeight,left:0,top:0,right:this.clientWidth,bottom:this.clientHeight,x:0,y:0};};
   for(const key of ["width","height"]){
    const original=Object.getOwnPropertyDescriptor(w.HTMLCanvasElement.prototype,key);
@@ -65,13 +68,15 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   w.SVGElement.prototype.getBoundingClientRect=()=>({width:300,height:260*300/360,left:0,top:0});
   w.eval(fs.readFileSync(path.join(root,"web/plots.js"),"utf8"));
   w.eval(fs.readFileSync(path.join(root,"web/coastlines.js"),"utf8"));
+  w.structuredClone=structuredClone;
+  for(const name of ["projections","wind","windows"])w.eval(fs.readFileSync(path.join(root,"web/"+name+".js"),"utf8"));
   w.eval(fs.readFileSync(path.join(root,"web/app.js"),"utf8"));
   const state=w.era5viewer.state,change=(id,value)=>{$(id).value=value;$(id).dispatchEvent(new w.Event("change",{bubbles:true}));};
   await until(()=>state.grid?.stats.valid>0,"initial grid");
   assert.equal($("time-label").textContent,"12:00 UTC");assert.equal(state.times.length,8);
   assert.equal($("date").value,"2016-09-26");
   assert.equal(state.reference,"msl");assert.equal($("height-reference").options[1].disabled,false);
-  assert.equal($("app-version").textContent,"v1.3");
+  assert.equal($("app-version").textContent,"v1.4");
   assert.equal(w.document.querySelector('[data-field="wind_speed"]').textContent,"Wind speed");
   assert.ok(w.ERA5Coastlines.lines.length>1000);
   assert.equal($("layer-netcdf").classList.contains("disabled"),false);
@@ -252,8 +257,94 @@ async function until(check,label){for(let i=0;i<300;i++){if(check())return;await
   assert.equal($("config-path").value,"~/chosen.json");
   edit("config-port",-1);assert.equal($("config-download").disabled,true);assert.match($("config-status").textContent,/port/);
   edit("config-port",8899);$("connection-close").click();
+
+  // v1.4: independent windows, real rendered projections and current-field wind.
+  const app=w.era5viewer,manager=app.windows;
+  const el=(win,id)=>win.panel.querySelector('[data-ui="'+id+'"]');
+  const editWin=(win,id,value)=>{el(win,id).value=value;el(win,id).dispatchEvent(new w.Event("change",{bubbles:true}));};
+  const bounds=(win,prefix,bottom,top)=>{el(win,prefix+"-bottom").value=bottom;el(win,prefix+"-top").value=top;el(win,prefix+"-bounds").dispatchEvent(new w.Event("submit",{bubbles:true,cancelable:true}));};
+  const pressureIs=(win,prefix,bottom,top)=>{
+    const plot=win.data[prefix==="profile"?"profilePlot":"sectionPlot"];
+    assert.ok(Math.abs(10**(-plot.y[0])-bottom)<1e-7);assert.ok(Math.abs(10**(-plot.y[1])-top)<1e-7);
+  };
+  app.selectPoint(w.L.latLng(65,-30));const p3=manager.active.point;
+  await until(()=>p3.data.profile?.profiles.t.length===137,"third point");
+  editWin(p3,"profile-axis","pressure");bounds(p3,"profile",300,100);pressureIs(p3,"profile",300,100);
+  const p3view=JSON.stringify(p3.data.profileView);
+  app.selectPoint(w.L.latLng(-50,120));const p4=manager.active.point;
+  await until(()=>p4.data.profile?.profiles.t.length===137,"fourth point");
+  editWin(p4,"profile-axis","pressure");bounds(p4,"profile",1000,850);pressureIs(p4,"profile",1000,850);
+  assert.equal(JSON.stringify(p3.data.profileView),p3view,"bounds in one window must not change another");
+  bounds(p4,"profile",100,300);assert.match(el(p4,"profile-bounds-status").textContent,/bottom greater/);pressureIs(p4,"profile",1000,850);
+  const pointer=(target,type,x,y)=>target.dispatchEvent(new w.MouseEvent(type,{button:0,clientX:x,clientY:y,bubbles:true,cancelable:true}));
+  const heading=p3.panel.querySelector(".window-drag-handle"),left=parseFloat(p3.panel.style.left);
+  pointer(heading,"pointerdown",100,100);pointer(heading,"pointermove",60,110);pointer(heading,"pointerup",60,110);
+  assert.equal(parseFloat(p3.panel.style.left),left-40,"drag moves only its window");
+  const handle=p3.panel.querySelector(".resize-s"),height=parseFloat(p3.panel.style.height);
+  pointer(handle,"pointerdown",100,100);pointer(handle,"pointermove",100,60);pointer(handle,"pointerup",100,60);
+  assert.equal(parseFloat(p3.panel.style.height),height-40,"bottom edge stretches vertically");
+  p3.panel.querySelector(".plot-scroll").scrollTop=88;
+  const geometry=[p3.panel.style.left,p3.panel.style.top,p3.panel.style.width,p3.panel.style.height];
+  el(p3,"point-minimise").click();assert.equal(p3.panel.hidden,true);assert.ok(manager.items.point.includes(p3));
+  $("point-menu-toggle").click();
+  $("point-window-list").children[manager.items.point.indexOf(p3)].querySelector("button").click();
+  assert.equal(p3.panel.hidden,false);assert.equal(p3.panel.querySelector(".plot-scroll").scrollTop,88);
+  assert.deepEqual([p3.panel.style.left,p3.panel.style.top,p3.panel.style.width,p3.panel.style.height],geometry);
+  assert.equal(JSON.stringify(p3.data.profileView),p3view);
+  $("section-new").click();const c2=manager.active.section;
+  mapClick(45,-30);mapClick(70,30);
+  await until(()=>c2.data.section?.waypoints.length===2,"second independent section");
+  editWin(c2,"section-axis","pressure");await until(()=>c2.data.section?.axis==="pressure","pressure section");
+  bounds(c2,"section",300,100);pressureIs(c2,"section",300,100);
+  const c2view=JSON.stringify(c2.data.sectionView);
+  $("section-new").click();const c3=manager.active.section;
+  mapClick(-70,100);mapClick(-40,140);
+  await until(()=>c3.data.section?.waypoints.length===2,"third independent section");
+  editWin(c3,"section-axis","pressure");await until(()=>c3.data.section?.axis==="pressure","third section pressure");
+  bounds(c3,"section",1000,850);pressureIs(c3,"section",1000,850);
+  assert.equal(JSON.stringify(c2.data.sectionView),c2view);
+  el(c2,"section-minimise").click();assert.equal(c2.panel.hidden,true);
+  const retainedProfiles=manager.items.point.slice(),retainedSections=manager.items.section.filter(win=>win.data.waypoints.length>=2);
+  await app.changeTime((state.ti+1)%state.times.length);
+  const matching=()=>retainedProfiles.every(win=>win.data.profile?.record.datetime===state.grid.record.datetime)&&retainedSections.every(win=>win.data.section?.record.datetime===state.grid.record.datetime);
+  await until(matching,"all open and minimised plots follow time changes");
+  assert.equal(JSON.stringify(c2.data.sectionView),c2view);pressureIs(p3,"profile",300,100);
+  $("play").click();const initialTime=state.grid.record.datetime;
+  await until(()=>state.grid.record.datetime!==initialTime&&matching(),"all retained plots synchronize during playback");
+  $("play").click();assert.equal(state.playing,false);pressureIs(c2,"section",300,100);pressureIs(c3,"section",1000,850);
+  for(const mode of ["north","south","globe"]){
+    app.setProjection(mode);await pause(60);
+    const canvas=app.captureMap(false);fs.writeFileSync(path.join(out,"v14-"+mode+".png"),canvas._native.toBuffer("image/png"));
+    assert.equal(app.view.mode,mode);assert.equal($("basemap-toggle").disabled,true);
+    const geom=app.view.geometry(),geo=app.view.unproject([geom.x+40,geom.y+40]);assert.ok(geo);
+    assert.ok(Number.isFinite(app.sample(state.grid,"values",geo.lat,geo.lng)));
+    const pixel=$("field-canvas")._context.getImageData(Math.round(geom.x+40),Math.round(geom.y+40),1,1).data;
+    assert.ok(pixel[3]>0,"projected field must render actual pixels");
+  }
+  assert.equal($("field-canvas")._context.getImageData(0,0,1,1).data[3],0,"globe leaves outside the limb transparent");
+  const globe=app.view.rotation.lng;pointer($("projected-map"),"pointerdown",500,450);pointer($("projected-map"),"pointermove",550,450);pointer($("projected-map"),"pointerup",550,450);
+  assert.notEqual(app.view.rotation.lng,globe,"drag rotates the globe");
+  $("point-new").click();
+  const count=manager.items.point.length,geo=app.view.unproject([574,480]);
+  pointer($("projected-map"),"pointerdown",574,480);pointer($("projected-map"),"pointerup",574,480);
+  await until(()=>manager.items.point.length===count+1&&manager.active.point.data.profile,"globe click selects geographic profile");
+  assert.ok(Math.abs(state.selected.lat-geo.lat)<1e-7);
+  $("wind-toggle").checked=false;$("animated-wind").checked=true;$("animated-wind").dispatchEvent(new w.Event("change"));
+  await until(()=>app.wind.steps>3,"animated wind advances independently of arrows");
+  assert.ok(app.wind.particles.some(p=>p.life>0));assert.ok($("wind-canvas")._context.getImageData(0,0,1148,922).data.some((v,i)=>i%4===3&&v>0));
+  fs.writeFileSync(path.join(out,"v14-globe-wind.png"),app.captureMap(false)._native.toBuffer("image/png"));
+  const u=state.grid.arrays.u;state.grid.arrays.u=new w.Float32Array(u.length).fill(NaN);app.wind.reset();const previousSteps=app.wind.steps;
+  await until(()=>app.wind.steps>previousSteps+2,"wind checks missing field");
+  assert.ok(app.wind.particles.every(p=>p.life===0),"missing wind must never create moving particles");state.grid.arrays.u=u;
+  $("animated-wind").checked=false;$("animated-wind").dispatchEvent(new w.Event("change"));assert.equal(app.wind.frame,null);
+  app.setProjection("flat");assert.equal($("basemap-toggle").disabled,false);
+  const beforeClose=manager.items.point.length;el(p4,"point-close").click();assert.equal(manager.items.point.length,beforeClose-1);assert.ok(p4.closed);
+  const beforeSectionClose=manager.items.section.length;el(c3,"section-close").click();assert.equal(manager.items.section.length,beforeSectionClose-1);assert.ok(c3.closed);
+  assert.equal(new Set([...w.document.querySelectorAll("[id]")].map(el=>el.id)).size,w.document.querySelectorAll("[id]").length,"window controls have unique IDs");
+  console.log("v1.4 checks: PASS (multiple windows, drag/resize, minimise/restore, independent 300–100 and 1000–850 hPa bounds, all-window playback, north/south/globe pixels and PNGs, globe rotation/click, animated wind and missing coverage)");
+
   assert.deepEqual(errors,[]);
-  console.log("Frontend DOM and canvas checks: PASS (v1.3 transects and synchronized playback, NetCDF, offline coastlines, compass coordinates, ERA5 PNG titles, personal JSON import/download, read-only configuration, plus all v1.1 checks)");
+  console.log("Frontend DOM and canvas checks: PASS (v1.4 transects and synchronized playback, NetCDF, offline coastlines, compass coordinates, ERA5 PNG titles, personal JSON import/download, read-only configuration, plus all v1.1 checks)");
  }finally{
   if(dom){dom.window.era5viewer?.dispose();dom.window.close();}
   if(server)server.kill();fs.rmSync(data,{recursive:true,force:true});

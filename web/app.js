@@ -2,12 +2,13 @@
    the local reader. A disconnected viewer never invents weather data. */
 (() => {
   "use strict";
-  const $ = id => document.getElementById(id);
+  let windows = null;
+  const $ = id => windows ? windows.get(id) : document.getElementById(id);
   const plots = window.ERA5Plots;
   function stored(key, fallback) { try { return localStorage.getItem("era5viewer." + key) || fallback; } catch (_) { return fallback; } }
   function remember(key, value) { try { localStorage.setItem("era5viewer." + key, value); } catch (_) {} }
   const state = {
-    base: /https?:/.test(location.protocol) ? location.origin : stored("api", "http://127.0.0.1:8768"),
+    base: /https?:/.test(location.protocol) ? location.origin : stored("api", "http://127.0.0.1:8769"),
     catalog: null, times: [], ti: 0, date: "", variable: "t", mode: "height", value: 5, reference: "msl",
     preferredReference: stored("heightReference", "msl"),
     grid: null, selected: null, profile: null, playing: false, timer: null,
@@ -28,16 +29,17 @@
   const NAMES = { t: "Temperature", u: "U wind · eastward", v: "V wind · northward", wind_speed: "Wind speed" };
   const map = L.map("map", { zoomControl: false, preferCanvas: true, minZoom: 1, maxZoom: 12,
     maxBounds: [[-85.05, -720], [85.05, 720]], maxBoundsViscosity: 0.8 }).setView([35, -5], 3);
-  L.control.zoom({position: "bottomright"}).addTo(map);
-  L.control.scale({position: "bottomright", imperial: false}).addTo(map);
+
   const basemap = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     crossOrigin: "anonymous",
     maxZoom: 12, attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'
   }).addTo(map);
-  const marker = L.marker([0, 0], {icon: L.divIcon({className: "selected-point", iconSize: [12, 12], iconAnchor: [6, 6]})});
   const fieldCanvas = $("field-canvas"), overlayCanvas = $("overlay-canvas");
   const ctx = fieldCanvas.getContext("2d"), overlay = overlayCanvas.getContext("2d");
   const small = document.createElement("canvas"), smallCtx = small.getContext("2d");
+  const view = new window.ERA5Projections.View(map, $("projected-map"), projectionChanged,
+    e => map.fire("click", e), e => e ? hover(e) : $("hover-readout").hidden = true);
+  const wind = new window.ERA5Wind($("wind-canvas"), view, () => state.grid, sample);
   let renderPending = false, changeTimer = null;
   const dismissedNotices = new Set();
 
@@ -82,7 +84,7 @@
     const r = current();
     if (!r) return {};
     return Object.assign({file: r.file, index: r.index, variable: state.variable, mode: state.mode,
-      value: state.value, reference: state.reference, winds: $("wind-toggle").checked ? 1 : 0}, extra);
+      value: state.value, reference: state.reference, winds: ($("wind-toggle").checked || $("animated-wind").checked) ? 1 : 0}, extra);
   }
   function url(path, params = {}) { return state.base.replace(/\/$/, "") + path + (Object.keys(params).length ? "?" + new URLSearchParams(params) : ""); }
   async function api(path, params = {}, signal) {
@@ -98,8 +100,8 @@
   }
   function abortLoads() {
     if (state.sliceAbort) state.sliceAbort.abort();
-    if (state.pointAbort) state.pointAbort.abort();
-    if (state.sectionAbort) state.sectionAbort.abort();
+    windows?.each("point", () => state.pointAbort?.abort());
+    windows?.each("section", () => state.sectionAbort?.abort());
   }
   function clearDrift(all = false) {
     if (all) {state.driftSerial++; state.tracing=false; state.tracks=[];}
@@ -110,15 +112,16 @@
   function invalidate() {
     abortLoads(); state.serial++; state.grid = null; state.profile = null;
     $("colour-legend").hidden = true; $("hover-readout").hidden = true;
-    $("slice-export").classList.add("disabled"); $("profile-export").classList.add("disabled");
-    $("layer-netcdf").classList.add("disabled");
-    $("map-png").disabled=true; $("profile-png").disabled=true;
-    state.profilePlot=null;
-    $("point-metrics").replaceChildren(); $("profile-chart").replaceChildren();
-    $("point-context").textContent = current() ? state.date + " · " + clock(current()) + " UTC · " + layerLabel() : "";
-    $("profile-note").textContent = "";
-    clearSectionFrame();
-    if (state.selected) $("point-status").textContent = "Reading selected point…";
+    $("slice-export").classList.add("disabled"); $("layer-netcdf").classList.add("disabled"); $("map-png").disabled = true;
+    windows.each("point", () => {
+      state.profile = null; state.profilePlot = null; $("profile-png").disabled = true;
+      $("profile-export").classList.add("disabled");
+      $("point-metrics").replaceChildren(); $("profile-chart").replaceChildren();
+      $("point-context").textContent = current() ? state.date + " · " + clock(current()) + " UTC · " + layerLabel() : "";
+      $("profile-note").textContent = ""; $("point-status").textContent = "Reading selected point…";
+    });
+    windows.each("section", clearSectionFrame);
+    wind.update();
     scheduleDraw();
   }
   function updateHead() {
@@ -311,7 +314,7 @@
     let lo=convert(g.stats.low),hi=convert(g.stats.high);
     if($("range-mode").value==="view") {
       const size=map.getSize(),values=[],bottom=Math.max(1,size.y-79);
-      for(let y=0;y<=bottom;y+=14)for(let x=0;x<=size.x;x+=14){const ll=map.containerPointToLatLng([x,y]),v=sample(g,"values",ll.lat,ll.lng);if(Number.isFinite(v))values.push(convert(v));}
+      for(let y=0;y<=bottom;y+=14)for(let x=0;x<=size.x;x+=14){const ll=view.unproject([x,y]),v=ll ? sample(g,"values",ll.lat,ll.lng) : NaN;if(Number.isFinite(v))values.push(convert(v));}
       if(!values.length)return;
       values.sort((a,b)=>a-b);lo=plots.quantile(values,.02);hi=plots.quantile(values,.98);
     }
@@ -320,7 +323,7 @@
   }
   function showFrame(data, requestArgs) {
     notice("");
-    state.grid = data;state.contourCache=null;
+    state.grid = data;state.contourCache=null; wind.reset(); wind.update($("animated-wind").checked);
     $("empty-state").hidden = true; $("empty-connect").hidden = true;
     updateScale();
     if (!state.scale.every(Number.isFinite) || state.scale[1] <= state.scale[0]) state.scale = [0,1];
@@ -345,8 +348,8 @@
       const data = await getFrame(requestArgs, controller.signal);
       if (serial !== state.serial) return false;
       showFrame(data, requestArgs);
-      if (state.selected) loadPoint();
-      if (state.waypoints.length >= 2) loadSection();
+      windows.each("point", loadPoint);
+      windows.each("section", () => {if (state.waypoints.length >= 2) loadSection();});
       cacheStatus();
       if (!state.playing) warmFrames();
       return true;
@@ -398,14 +401,16 @@
     $("variable").replaceChildren(...r.fields.map(f => new Option(NAMES[f.id] || f.name, f.id)));
     $("variable").value = state.variable; $("variable").disabled = false;
     const wind = r.fields.some(f=>f.id==="u") && r.fields.some(f=>f.id==="v");
-    $("wind-toggle").disabled = !wind; $("drift-run").disabled = !wind || state.tracing;
-    const profile = $("profile-variable"), selected = profile.value;
-    const choices = ["t", "wind_speed", "u", "v"].filter(v => r.fields.some(f => f.id === v));
-    if (choices.join() !== Array.from(profile.options, o => o.value).join()) {
-      profile.replaceChildren(...choices.map(v => new Option(NAMES[v], v)));
-      if (choices.includes(selected)) profile.value = selected;
-    }
-    configureSectionAxis(r);
+    $("wind-toggle").disabled = $("animated-wind").disabled = !wind; $("drift-run").disabled = !wind || state.tracing;
+    const configureProfile=()=>{
+      const profile=$("profile-variable"),selected=profile.value;
+      const choices=["t","wind_speed","u","v"].filter(v=>r.fields.some(f=>f.id===v));
+      profile.replaceChildren(...choices.map(v=>new Option(NAMES[v],v)));
+      if(choices.includes(selected))profile.value=selected;
+      $("drift-run").disabled=!wind||state.tracing;
+    };
+    if(windows.items.point.length)windows.each("point",configureProfile);else configureProfile();
+    if(windows.items.section.length)windows.each("section",()=>configureSectionAxis(r));else configureSectionAxis(r);
   }
   function makeTimeTicks() {
     const size = Math.max(2, Math.floor($("time-ticks").clientWidth / 44));
@@ -436,6 +441,7 @@
     clearTimeout(state.timer);
     state.playAbort?.abort();
     state.playViews = null;
+    if (windows) for (const kind of ["point", "section"]) windows.each(kind, w => {w.playView = null;});
     $("play").textContent = "▶";
     $("play").setAttribute("aria-label", "Play available times");
     cacheStatus();
@@ -448,15 +454,16 @@
     const index = (state.ti + 1) % state.times.length;
     const record = state.times[index], request = frameArgs(record, preferred);
     const signal = state.playAbort.signal;
-    const pending = Promise.allSettled([
-      getFrame(request, signal),
-      chartResult("profile", pointRequest(request), signal),
-      chartResult("cross-section", sectionRequest(record, request), signal)
-    ]);
+    const jobs = [];
+    for (const kind of ["point", "section"]) windows.each(kind, win => {
+      const params = kind === "point" ? pointRequest(request) : sectionRequest(record, request);
+      if (params) jobs.push(chartResult(kind === "point" ? "profile" : "cross-section", params, signal).then(result => ({win, result})));
+    });
+    const pending = Promise.allSettled([getFrame(request, signal), Promise.all(jobs)]);
     state.timer = setTimeout(async () => {
       if (!state.playing || generation !== state.playSerial) return;
       cacheStatus("Waiting for " + clock(record) + " UTC…");
-      const [mapFrame, point, section] = await pending;
+      const [mapFrame, results] = await pending;
       if (!state.playing || generation !== state.playSerial) return;
       if (mapFrame.status === "rejected") {
         stopPlay();
@@ -467,10 +474,8 @@
       state.serial++;
       selectTime(index, request);
       showFrame(mapFrame.value, request);
-      if (point.value) showPointFrame(point.value);
-      if (section.value) showSectionFrame(section.value);
-      else if (state.waypoints.length >= 2) {
-        showSectionFrame({error: new Error("The cross-section coordinate is unavailable at this time.")});
+      if (results.status === "fulfilled") for (const {win, result} of results.value) {
+        if (!win.closed) windows.with(win.kind, win, () => win.kind === "point" ? showPointFrame(result) : showSectionFrame(result));
       }
       cacheStatus();
       queuePlayback(generation, +$("animation-speed").value, preferred);
@@ -483,8 +488,8 @@
     const generation = ++state.playSerial;
     state.playAbort = new AbortController();
     state.playViews = {};
-    lockProfileAxes(state.profilePlot);
-    lockSectionAxes(state.sectionPlot);
+    windows.each("point", () => lockProfileAxes(state.profilePlot));
+    windows.each("section", () => lockSectionAxes(state.sectionPlot));
     $("play").textContent = "Ⅱ";
     $("play").setAttribute("aria-label", "Pause animation");
     const {variable, mode, value, preferredReference} = state;
@@ -534,6 +539,7 @@
   }
   function fitData() {
     const r = current(); if (!r) return;
+    if (view.mode !== "flat") {view.reset(r); return;}
     if (r.cyclic) map.setView([30,0], 2);
     else map.fitBounds([[Math.max(-84,r.bounds[0]),r.bounds[1]],[Math.min(84,r.bounds[2]),r.bounds[3]]], {padding:[35,100], maxZoom:7});
   }
@@ -562,7 +568,7 @@
     }
     return sum;
   }
-  function sample(grid, name, lat, lon) { return bilinear(grid.arrays[name],grid.shape,axisBracket(grid.latitudes,lat),lonBracket(grid,lon)); }
+  function sample(grid, name, lat, lon) { if (!Number.isFinite(lat) || !Number.isFinite(lon)) return NaN; return bilinear(grid.arrays[name],grid.shape,axisBracket(grid.latitudes,lat),lonBracket(grid,lon)); }
   const PALETTES = {
     temperature: [[35,55,129],[47,139,194],[70,189,180],[205,232,183],[253,213,121],[236,114,99],[164,47,91]],
     component: [[33,73,137],[74,137,186],[150,195,209],[241,242,224],[244,198,133],[223,135,69],[155,67,38]],
@@ -593,6 +599,7 @@
     const size=map.getSize(), dpr=Math.min(2,window.devicePixelRatio||1);
     for(const c of [fieldCanvas,overlayCanvas]) { c.width=Math.round(size.x*dpr); c.height=Math.round(size.y*dpr); }
     ctx.setTransform(dpr,0,0,dpr,0,0); overlay.setTransform(dpr,0,0,dpr,0,0);
+    wind.resize();
     if (state.times.length) { makeTimeTicks(); updateHead(); }
     scheduleDraw();
   }
@@ -600,17 +607,20 @@
     const size=map.getSize();
     ctx.clearRect(0,0,size.x,size.y); overlay.clearRect(0,0,size.x,size.y);
     const g=state.grid;
+    if (view.mode === "globe") {const geom = view.geometry(); ctx.beginPath(); ctx.arc(geom.x, geom.y, geom.scale, 0, Math.PI * 2); ctx.fillStyle = "#dae9e1"; ctx.fill();}
     if (g) {
       updateScale(); updateLegend();
-      const pixel=3, w=Math.ceil(size.x/pixel), h=Math.ceil(size.y/pixel);
+      const pixel = view.dragging ? 5 : 3, w=Math.ceil(size.x/pixel), h=Math.ceil(size.y/pixel);
       small.width=w; small.height=h;
       const image=smallCtx.createImageData(w,h), colours=lut(), [lo,hi]=state.scale, alpha=Math.round(+$("opacity").value*2.55);
-      const xs=Array.from({length:w},(_,x)=>lonBracket(g,map.containerPointToLatLng([x*pixel+pixel/2,0]).lng));
+      const flat = view.mode === "flat";
+      const xs = flat ? Array.from({length:w},(_,x)=>lonBracket(g,view.unproject([x*pixel+pixel/2,0]).lng)) : null;
       for(let y=0;y<h;y++) {
-        const lat=map.containerPointToLatLng([0,y*pixel+pixel/2]).lat, ys=axisBracket(g.latitudes,lat);
-        if (!ys) continue;
+        const ys = flat ? axisBracket(g.latitudes, view.unproject([0,y*pixel+pixel/2]).lat) : null;
+        if (flat && !ys) continue;
         for(let x=0;x<w;x++) {
-          const raw=bilinear(g.arrays.values,g.shape,ys,xs[x]);
+          const ll = flat ? null : view.unproject([x*pixel+pixel/2,y*pixel+pixel/2]);
+          const raw = flat ? bilinear(g.arrays.values,g.shape,ys,xs[x]) : ll ? sample(g,"values",ll.lat,ll.lng) : NaN;
           if (!Number.isFinite(raw)) continue;
           const v=convert(raw), c=colours[Math.max(0,Math.min(255,Math.round((v-lo)/(hi-lo)*255)))], i=(y*w+x)*4;
           image.data[i]=c[0]; image.data[i+1]=c[1]; image.data[i+2]=c[2]; image.data[i+3]=alpha;
@@ -619,55 +629,87 @@
       smallCtx.putImageData(image,0,0); ctx.imageSmoothingEnabled=true;
       ctx.drawImage(small,0,0,size.x,size.y);
     }
-    if ($("grid-toggle").checked) drawGrid(size);
-    if ($("coastline-toggle").checked) drawCoastlines(size);
+    if (view.mode === "globe") {
+      const g = view.geometry(), shade = ctx.createRadialGradient(g.x-g.scale*.28,g.y-g.scale*.28,g.scale*.12,g.x,g.y,g.scale);
+      shade.addColorStop(0,"rgba(255,255,255,.05)"); shade.addColorStop(.8,"rgba(10,40,30,.02)"); shade.addColorStop(1,"rgba(10,40,30,.22)");
+      ctx.beginPath(); ctx.arc(g.x,g.y,g.scale,0,Math.PI*2); ctx.fillStyle=shade; ctx.fill();
+      ctx.strokeStyle="#70958780"; ctx.lineWidth=1; ctx.stroke();
+    }
+    const gridLabels = $("grid-toggle").checked ? drawGrid(size) : [];
+    if ($("coastline-toggle").checked || view.mode !== "flat") drawCoastlines(size);
     if(g&&$("contour-toggle").checked)drawContours(size,g);
-    if (g && $("wind-toggle").checked && g.arrays.u && g.arrays.v) drawWind(size,g);
+    if (g && $("wind-toggle").checked && !$("animated-wind").checked && g.arrays.u && g.arrays.v) drawWind(size,g);
+    overlay.save(); overlay.font="10px sans-serif"; const occupied=[];
+    for(const [text,x,y] of gridLabels)mapPill(text,x,y,occupied); overlay.restore();
     drawTracks(size);
-    drawSectionRoute();
+    windows.each("section", drawSectionRoute);
+    updateMapScale();
+  }
+  function geoPath(points, copies = true) {
+    const size = map.getSize(), shifts = view.mode === "flat" && copies ? [-360,0,360] : [0];
+    for (const shift of shifts) {
+      let previous = null;
+      for (const point of points) {
+        const p = view.project([point[0], point[1] + shift]);
+        if (!p || Math.abs(p.x) > size.x * 30 || Math.abs(p.y) > size.y * 30) {previous = null; continue;}
+        if (!previous || Math.hypot(p.x-previous.x,p.y-previous.y) > Math.max(size.x,size.y)*.45) overlay.moveTo(p.x,p.y);
+        else overlay.lineTo(p.x,p.y);
+        previous = p;
+      }
+    }
   }
   function drawCoastlines(size) {
     const coast=window.ERA5Coastlines;if(!coast)return;
-    const bounds=map.getBounds(),west=bounds.getWest(),east=bounds.getEast();
-    overlay.save();overlay.beginPath();overlay.rect(0,0,size.x,size.y);overlay.clip();
-    overlay.lineWidth=.9;overlay.strokeStyle="rgba(25,48,49,.85)";overlay.lineJoin="round";overlay.lineCap="round";
-    overlay.beginPath();
+    overlay.save();overlay.beginPath();overlay.rect(0,0,size.x,size.y-79);overlay.clip();
+    overlay.lineWidth=.85;overlay.strokeStyle="rgba(25,65,50,.72)";overlay.lineJoin="round";overlay.lineCap="round";overlay.beginPath();
+    const bounds = view.mode === "flat" ? map.getBounds() : null;
     for(const line of coast.lines) {
-      const [x0,y0,x1,y1]=line.bounds;
-      if(y1<bounds.getSouth()||y0>bounds.getNorth())continue;
-      const first=Math.ceil((west-x1)/360),last=Math.floor((east-x0)/360);
-      for(let copy=first;copy<=last;copy++) {
-        let firstPoint=true;
-        for(const [lon,lat] of line.points) {
-          const p=map.latLngToContainerPoint([Math.max(-85.05,Math.min(85.05,lat)),lon+copy*360]);
-          if(firstPoint){overlay.moveTo(p.x,p.y);firstPoint=false;}else overlay.lineTo(p.x,p.y);
-        }
-      }
+      if (bounds && (line.bounds[3]<bounds.getSouth() || line.bounds[1]>bounds.getNorth())) continue;
+      geoPath(line.points.map(([lon,lat])=>[Math.max(-89.999,Math.min(89.999,lat)),lon]));
     }
     overlay.stroke();overlay.restore();
   }
+  function mapPill(text, x, y, occupied) {
+    const width=overlay.measureText(text).width+14, height=19, size=map.getSize();
+    x=Math.max(7,Math.min(size.x-width-7,x-width/2)); y=Math.max(10,Math.min(size.y-100,y));
+    if (occupied.some(p=>Math.abs(p.x+p.w/2-x-width/2)<(p.w+width)/2+12 && Math.abs(p.y-y)<25)) return;
+    occupied.push({x,y,w:width});overlay.fillStyle="#fbfef9e8";overlay.strokeStyle="#a7c3b680";overlay.lineWidth=.6;
+    overlay.beginPath();overlay.roundRect(x,y-height/2,width,height,8);overlay.fill();overlay.stroke();
+    overlay.fillStyle="#3d6956";overlay.textAlign="center";overlay.textBaseline="middle";overlay.fillText(text,x+width/2,y+.5);
+  }
   function drawGrid(size) {
-    const b=map.getBounds(), step=map.getZoom()>=7?1:map.getZoom()>=5?5:map.getZoom()>=3?15:30;
-    overlay.save(); overlay.lineWidth=.7; overlay.strokeStyle="rgba(28,66,52,.22)";
-    overlay.fillStyle="#466f60"; overlay.font="9px sans-serif";
-    for(let lat=Math.ceil(b.getSouth()/step)*step;lat<=Math.min(85,b.getNorth());lat+=step) {
-      if(lat<-85) continue; const p=map.latLngToContainerPoint([lat,b.getWest()]);
-      overlay.beginPath();overlay.moveTo(0,p.y);overlay.lineTo(size.x,p.y);overlay.stroke();
-      if(p.y>155 && p.y<size.y-90) {overlay.fillStyle="#ffffffe0";overlay.fillRect(8,p.y-11,34,13);overlay.fillStyle="#466f60";overlay.fillText(Math.abs(lat)+"°"+(lat<0?"S":lat>0?"N":""),11,p.y-2);}
+    const step=view.zoomLevel()>=7?1:view.zoomLevel()>=5?5:view.zoomLevel()>=3?15:30;
+    const labels=[],queueLabel=(text,x,y)=>labels.push([text,x,y]);overlay.save();overlay.lineWidth=.65;overlay.strokeStyle="rgba(28,66,52,.23)";overlay.font="10px sans-serif";
+    const b = view.mode === "flat" ? map.getBounds() : null;
+    const west = b ? b.getWest() : -180, east = b ? b.getEast() : 180;
+    const south = b ? Math.max(-85,b.getSouth()) : -80, north = b ? Math.min(85,b.getNorth()) : 80;
+    for(let lat=Math.ceil(south/step)*step;lat<=north;lat+=step) {
+      const points=[];for(let lon=west;lon<=east+.1;lon+=Math.min(2,step/3))points.push([lat,lon]);
+      overlay.beginPath();geoPath(points,false);overlay.stroke();
+      if(b) {const p=view.project([lat,west]);if(p&&p.y>240&&p.y<size.y-110)queueLabel(Math.abs(lat)+"°"+(lat<0?"S":lat>0?"N":""),29,p.y);}
+      else {const p=view.project([lat,view.centre().lng+35]);if(p&&p.x>30&&p.x<size.x-30&&p.y>230&&p.y<size.y-120)queueLabel(Math.abs(lat)+"°"+(lat<0?"S":lat>0?"N":""),p.x,p.y);}
     }
-    for(let lon=Math.ceil(b.getWest()/step)*step;lon<=b.getEast();lon+=step) {
-      const p=map.latLngToContainerPoint([b.getSouth(),lon]);overlay.beginPath();overlay.moveTo(p.x,0);overlay.lineTo(p.x,size.y);overlay.stroke();
-      const l=((lon+180)%360+360)%360-180;
-      if(p.x>20&&p.x<size.x-40) {overlay.fillStyle="#ffffffe0";overlay.fillRect(p.x-15,size.y-97,37,13);overlay.fillStyle="#466f60";overlay.fillText(Math.abs(l)+"°"+(l<0?"W":l>0?"E":""),p.x-12,size.y-87);}
+    for(let lon=Math.ceil(west/step)*step;lon<=east;lon+=step) {
+      const points=[];for(let lat=-89.9;lat<=89.91;lat+=1.5)points.push([lat,lon]);
+      overlay.beginPath();geoPath(points,false);overlay.stroke();
+      const normalized=window.ERA5Projections.wrap(lon),text=Math.abs(normalized)+"°"+(normalized<0?"W":normalized>0?"E":"");
+      if(b) {const p=view.project([0,lon]);if(p&&p.x>30&&p.x<size.x-45)queueLabel(text,p.x,size.y-111);}
+      else {
+        const g=view.geometry();
+        const radius=p=>Math.hypot(p.x-g.x,p.y-g.y);
+        const candidates=points.map(point=>view.project(point)).filter(p=>p&&p.x>35&&p.x<size.x-35&&p.y>238&&p.y<size.y-115&&radius(p)>g.scale*.55);
+        const p=candidates.sort((a,b)=>radius(b)-radius(a))[0]; if(p)queueLabel(text,p.x,p.y);
+      }
     }
-    overlay.restore();
+    overlay.restore();return labels;
   }
   function drawWind(size,g) {
     overlay.save();overlay.strokeStyle="#163b35d9";overlay.fillStyle="#163b35d9";overlay.lineWidth=1.3;
     for(let y=35;y<size.y-82;y+=57) for(let x=28;x<size.x;x+=57) {
-      const ll=map.containerPointToLatLng([x,y]), u=sample(g,"u",ll.lat,ll.lng), v=sample(g,"v",ll.lat,ll.lng);
+      const ll=view.unproject([x,y]); if(!ll)continue; const u=sample(g,"u",ll.lat,ll.lng), v=sample(g,"v",ll.lat,ll.lng);
       const speed=Math.hypot(u,v); if(!Number.isFinite(speed)||speed<.2) continue;
-      const length=9+Math.min(15,speed*.25), angle=Math.atan2(-v,u);
+      const vector=view.vector(ll.lat,ll.lng,u,v);if(!vector)continue;
+      const length=9+Math.min(15,speed*.25), angle=Math.atan2(vector.y,vector.x);
       overlay.save();overlay.translate(x,y);overlay.rotate(angle);
       overlay.beginPath();overlay.moveTo(-length/2,0);overlay.lineTo(length/2,0);overlay.stroke();
       overlay.beginPath();overlay.moveTo(length/2,0);overlay.lineTo(length/2-4,-2.8);overlay.lineTo(length/2-4,2.8);overlay.closePath();overlay.fill();overlay.restore();
@@ -675,10 +717,10 @@
     overlay.restore();
   }
   function drawContours(size,g) {
-    const centre=map.getCenter(),key=[state.cacheEpoch,g.record.file,g.record.index,g.variable.id,g.mode,g.value,g.reference,units(),...state.scale,centre.lat,centre.lng,map.getZoom(),size.x,size.y].join("|");
+    const centre=view.centre(),key=[view.key(),state.cacheEpoch,g.record.file,g.record.index,g.variable.id,g.mode,g.value,g.reference,units(),...state.scale,centre.lat,centre.lng,map.getZoom(),size.x,size.y].join("|");
     if(state.contourCache?.key!==key){
       const levels=plots.niceTicks(state.scale[0],state.scale[1],7);
-      const lines=plots.contours(size.x,Math.max(1,size.y-79),levels,(x,y)=>{const ll=map.containerPointToLatLng([x,y]);return convert(sample(g,"values",ll.lat,ll.lng));});
+      const lines=plots.contours(size.x,Math.max(1,size.y-79),levels,(x,y)=>{const ll=view.unproject([x,y]);return ll ? convert(sample(g,"values",ll.lat,ll.lng)) : NaN;});
       state.contourCache={key,lines};
     }
     const labels=[];overlay.save();overlay.lineJoin="round";overlay.lineCap="round";overlay.font="10px sans-serif";
@@ -695,7 +737,7 @@
           if(x<35||x>size.x-35||y<35||y>size.y-110||labels.some(p=>Math.hypot(p[0]-x,p[1]-y)<65))continue;
           const text=plots.tickLabel(level),width=overlay.measureText(text).width;
           let angle=Math.atan2(b[1]-a[1],b[0]-a[0]);if(angle>Math.PI/2)angle-=Math.PI;if(angle<-Math.PI/2)angle+=Math.PI;
-          overlay.save();overlay.translate(x,y);overlay.rotate(angle);overlay.fillStyle="#fffffff0";overlay.fillRect(-width/2-3,-7,width+6,14);overlay.fillStyle="#193d34";overlay.textAlign="center";overlay.textBaseline="middle";overlay.fillText(text,0,0);overlay.restore();labels.push([x,y]);
+          overlay.save();overlay.translate(x,y);overlay.rotate(angle);overlay.fillStyle="#ffffffe6";overlay.beginPath();overlay.roundRect(-width/2-4,-8,width+8,16,5);overlay.fill();overlay.fillStyle="#193d34";overlay.textAlign="center";overlay.textBaseline="middle";overlay.fillText(text,0,0);overlay.restore();labels.push([x,y]);
         }
       }
     }
@@ -704,18 +746,16 @@
   function drawTracks(size) {
     overlay.save();overlay.lineJoin="round";overlay.lineCap="round";
     for(const track of state.tracks) {
-      let previous=map.getCenter().lng;
+      let previous=view.centre().lng;
       const points=track.result.path.map(p=>{const lon=p.longitude+360*Math.round((previous-p.longitude)/360);previous=lon;return [p.latitude,lon];});
-      for(const shift of [-360,0,360]) {
-        const projected=points.map(p=>map.latLngToContainerPoint([p[0],p[1]+shift]));
-        if(!projected.some(p=>p.x>=-20&&p.x<=size.x+20&&p.y>=-20&&p.y<=size.y+20))continue;
-        overlay.beginPath();projected.forEach((p,i)=>i?overlay.lineTo(p.x,p.y):overlay.moveTo(p.x,p.y));
-        overlay.globalAlpha=track.id===state.activeTrack?1:.85;overlay.strokeStyle="#ffffffee";overlay.lineWidth=5;overlay.stroke();overlay.strokeStyle=track.colour;overlay.lineWidth=3;overlay.stroke();
-        const a=projected[0];overlay.beginPath();overlay.arc(a.x,a.y,4,0,Math.PI*2);overlay.fillStyle=track.colour;overlay.fill();
-        overlay.font="bold 10px sans-serif";overlay.strokeStyle="white";overlay.lineWidth=3;overlay.strokeText("T"+track.id,a.x+7,a.y-7);overlay.fillText("T"+track.id,a.x+7,a.y-7);
-      }
+      overlay.beginPath();geoPath(points);overlay.globalAlpha=track.id===state.activeTrack?1:.8;
+      overlay.strokeStyle="#ffffffee";overlay.lineWidth=5;overlay.stroke();overlay.strokeStyle=track.colour;overlay.lineWidth=3;overlay.stroke();
+      const a=view.project(points[0]);if(a) {overlay.beginPath();overlay.arc(a.x,a.y,4,0,Math.PI*2);overlay.fillStyle=track.colour;overlay.fill();overlay.font="bold 10px sans-serif";overlay.strokeStyle="white";overlay.lineWidth=3;overlay.strokeText("T"+track.id,a.x+7,a.y-7);overlay.fillText("T"+track.id,a.x+7,a.y-7);}
     }
-    if(state.selected){const p=map.latLngToContainerPoint([state.selected.lat,state.selected.lon]);overlay.globalAlpha=1;overlay.beginPath();overlay.arc(p.x,p.y,5,0,Math.PI*2);overlay.fillStyle="white";overlay.fill();overlay.strokeStyle="#087f75";overlay.lineWidth=2;overlay.stroke();}
+    windows.each("point", win=>{if(!state.selected)return;const p=view.project([state.selected.lat,state.selected.lon]);if(!p)return;
+      overlay.globalAlpha=1;overlay.beginPath();overlay.arc(p.x,p.y,5,0,Math.PI*2);overlay.fillStyle="white";overlay.fill();overlay.strokeStyle="#087f75";overlay.lineWidth=2;overlay.stroke();
+      overlay.font="bold 10px sans-serif";overlay.fillStyle="#1f5e4b";overlay.fillText("P"+win.id,p.x+9,p.y-7);
+    });
     overlay.restore();
   }
   function captureMap(includeTiles=true) {
@@ -732,7 +772,7 @@
         const b=image.getBoundingClientRect();try{c.drawImage(image,b.left-bounds.left,head+b.top-bounds.top,b.width,b.height);tiles++;}catch(_){}
       }
     }
-    for(const layer of [fieldCanvas,overlayCanvas])c.drawImage(layer,0,0,layer.width,h/size.y*layer.height,0,head,w,h);
+    for(const layer of [fieldCanvas,...($("animated-wind").checked?[$("wind-canvas")]:[]),overlayCanvas])c.drawImage(layer,0,0,layer.width,h/size.y*layer.height,0,head,w,h);
     c.restore();
     c.fillStyle="#183033";c.font="bold 19px sans-serif";c.fillText("ERA5 · "+(NAMES[state.variable]||fieldMeta().name)+" · "+units(),14,25,w-28);
     c.font="12px sans-serif";c.fillText(state.grid.record.datetime.replace("T"," ").replace("Z"," UTC")+" · "+layerLabel()+" · "+resolutionLabel(state.grid.record),14,47,w-28);
@@ -743,18 +783,19 @@
     for(const v of ticks){const x=left+(v-lo)/(hi-lo)*width;c.textAlign=v===lo?"left":v===hi?"right":"center";c.fillText(plots.tickLabel(v),x,barY+29);}
     c.textAlign="left";c.font="11px sans-serif";c.fillText($("legend-title").textContent+" ("+units()+") · "+$("range-mode").selectedOptions[0].textContent,left,barY+49,w-48);
     c.font="10px sans-serif";c.fillStyle="#607367";
-    const notes=[];if(state.mode==="height")notes.push("Geopotential height"+(current().fields.some(f=>f.id==="q")?"":" · dry air approximation (q absent)"));if(state.tracks.length)notes.push(state.tracks.length+" horizontal wind track"+(state.tracks.length===1?"":"s"));if($("coastline-toggle").checked)notes.push("Coastlines: Natural Earth");if(tiles)notes.push("© OpenStreetMap contributors");
+    const notes=[{flat:"Web Mercator",north:"North polar stereographic",south:"South polar stereographic",globe:"Orthographic globe"}[view.mode]];if(state.mode==="height")notes.push("Geopotential height"+(current().fields.some(f=>f.id==="q")?"":" · dry air approximation (q absent)"));if(state.tracks.length)notes.push(state.tracks.length+" horizontal wind track"+(state.tracks.length===1?"":"s"));if($("coastline-toggle").checked||view.mode!=="flat")notes.push("Coastlines: Natural Earth");if(tiles)notes.push("© OpenStreetMap contributors");
     c.fillText(notes.join(" · "),left,barY+69,w-48);
     return canvas;
   }
   async function captureProfile() {
     const plot=state.profilePlot,profile=state.profile;if(!plot||!profile)throw new Error("Select a point and load its profile first.");
+    const profileNote = $("profile-note").textContent;
     const svg=plot.svg.replace('<svg ', '<svg width="900" height="650" '),image=new Image();
     await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(new Error("Could not render the profile PNG."));image.src="data:image/svg+xml;base64,"+btoa(unescape(encodeURIComponent(svg)));});
     const canvas=document.createElement("canvas");canvas.width=900;canvas.height=760;const c=canvas.getContext("2d");c.fillStyle="white";c.fillRect(0,0,900,760);
     c.font="bold 22px sans-serif";c.fillStyle="#183033";c.fillText("ERA5 · "+(NAMES[$("profile-variable").value]||$("profile-variable").value)+" profile",24,29);
     c.font="14px sans-serif";c.fillText(profile.record.datetime.replace("T"," ").replace("Z"," UTC")+" · "+coordinateLabel(profile.latitude,profile.longitude),24,55);
-    c.drawImage(image,0,75,900,650);c.font="12px sans-serif";c.fillStyle="#607367";c.fillText($("profile-note").textContent,24,749,852);return canvas;
+    c.drawImage(image,0,75,900,650);c.font="12px sans-serif";c.fillStyle="#607367";c.fillText(profileNote,24,749,852);return canvas;
   }
   async function saveCanvas(canvas,name) {
     const blob=await new Promise((resolve,reject)=>{try{canvas.toBlob(b=>b?resolve(b):reject(new Error("Could not encode PNG.")),"image/png");}catch(error){reject(error);}});
@@ -771,8 +812,9 @@
 
   function selectPoint(ll) {
     stopPlay();
+    const win = windows.create("point");
     state.selected={lat:ll.lat,lon:ll.lng}; state.profile=null; state.profileView=null; state.profilePlot=null; $("profile-png").disabled=true;
-    marker.setLatLng(ll).addTo(map); showPointPanel();
+    showPointPanel(); windows.refresh = true; updateWindowMenus(); scheduleDraw();
     updateCoordinates();
     $("point-status").textContent=state.grid?"Reading selected point…":"Load a layer to inspect this point.";
     $("point-metrics").replaceChildren();$("profile-chart").replaceChildren();
@@ -781,15 +823,20 @@
   }
   function narrowMap() { return window.innerWidth <= 900; }
   function updatePanels() {
-    const point = !$("point-panel").hidden, section = !$("section-panel").hidden;
-    $("colour-legend").classList.toggle("panel-visible", point);
-    $("colour-legend").classList.toggle("section-visible", section);
-    $("map").parentElement.classList.toggle("both-plots", point && section);
-    $("point-open").hidden = point || !state.selected;
+    if(!windows)return;
+    const active=windows.active.section;
+    for(const win of windows.items.section)if(win!==active)win.data.sectionEditing=false;
+    const editing=!!active?.data.sectionEditing;
+    $("section-tool").setAttribute("aria-pressed",String(editing));
+    $("map").classList.toggle("section-editing",editing);$("projected-map").classList.toggle("section-editing",editing);
+    const point=windows.items.point.some(w=>!w.panel.hidden),section=windows.items.section.some(w=>!w.panel.hidden);
+    $("colour-legend").classList.toggle("panel-visible",point);
+    $("colour-legend").classList.toggle("section-visible",section);
+    $("map").parentElement.classList.toggle("both-plots",point&&section);
+    updateWindowMenus();
   }
   function showPointPanel() {
-    if (narrowMap()) closeSectionPanel();
-    $("point-panel").hidden = false;
+    const win=windows.current("point");if(win)windows.focus(win);
     updatePanels();
   }
   function pointRequest(request = args()) {
@@ -802,12 +849,12 @@
     state.pointAbort?.abort();
     const controller = new AbortController();
     state.pointAbort = controller;
-    const serial = state.serial, selected = state.selected;
+    const serial = state.serial, selected = state.selected, win = windows.current("point");
     $("point-status").textContent = "Reading selected point…";
     $("profile-export").classList.add("disabled");
     $("profile-png").disabled = true;
     const result = await chartResult("profile", pointRequest(), controller.signal);
-    if (!controller.signal.aborted && serial === state.serial && selected === state.selected) showPointFrame(result);
+    if (!controller.signal.aborted && serial === state.serial && !win.closed) windows.with("point",win,()=>{if(selected===state.selected)showPointFrame(result);});
   }
   function showPointFrame({data, request, error}) {
     if (error) {
@@ -837,9 +884,8 @@
     if(selected.wind_from_deg!=null) $("point-context").textContent+=" · wind from "+format(selected.wind_from_deg,0)+"°";
   }
   function lockProfileAxes(plot) {
-    if (plot && state.playViews && state.playViews.profile?.key !== plot.key) {
-      state.playViews.profile = {key: plot.key, x: plot.fullX, y: plot.fullY};
-    }
+    const win=windows.current("point");
+    if(plot&&state.playing&&win?.playView?.key!==plot.key)win.playView={key:plot.key,x:plot.x,y:plot.y};
   }
   function renderProfile() {
     if (!state.profile) return;
@@ -850,9 +896,10 @@
     const plot = plots.profile(state.profile, {
       variable, axis: $("profile-axis").value, reference,
       convert: v => convert(v, variable), unit: units(variable), name: NAMES[variable] || variable,
-      view: state.profileView, fallbackView: state.playViews?.profile, selected: {mode, value}
+      view: state.profileView, fallbackView: windows.current("point")?.playView, selected: {mode, value}
     });
     lockProfileAxes(plot);
+    if(plot)plot.svg=plot.svg.replaceAll("profile-clip","profile-clip-"+windows.current("point").id);
     state.profilePlot=plot;$("profile-png").disabled=!plot;
     if(!plot){$("profile-chart").textContent="No valid vertical profile at this location.";return;}
     $("profile-axis").value=plot.axis;$("profile-chart").innerHTML=plot.svg;
@@ -860,7 +907,9 @@
       ? (state.profile.record.fields.some(f => f.id === "q") ? "Hydrostatic geopotential height." :
         "Height uses dry air approximation (q absent). Geopotential metres " + (reference === "msl" ? "above sea level." : "above ground."))
       : "Pressure or model-level coordinate; height is unavailable.";
-    bindPlotZoom($("profile-chart"), plot, $("profile-zoom-axis"), setProfileView, resetProfileZoom);
+    const win=windows.current("point");
+    bindPlotZoom($("profile-chart"), plot, $("profile-zoom-axis"), (x,y)=>windows.with("point",win,()=>setProfileView(x,y)), ()=>windows.with("point",win,resetProfileZoom));
+    syncBounds("profile",plot);
   }
   function setProfileView(x,y) {
     const plot=state.profilePlot;if(!plot||x[1]-x[0]<1e-8||y[1]-y[0]<1e-8)return;
@@ -869,6 +918,7 @@
   function resetProfileZoom() {
     stopPlay();
     state.profileView = null;
+    $("profile-bounds-status").textContent="";
     renderProfile();
   }
   function bindPlotZoom(chart, plot, zoomAxis, setView, reset) {
@@ -918,21 +968,19 @@
     return {file: record.file, index: record.index, variable, axis, points: JSON.stringify(state.waypoints)};
   }
   function showSectionPanel() {
-    if (narrowMap()) $("point-panel").hidden = true;
-    $("section-panel").hidden = false;
-    updatePanels();
-    updateSectionControls();
+    const win=windows.current("section")||windows.create("section");
+    windows.focus(win); updatePanels(); updateSectionControls();
   }
   function setSectionEditing(editing) {
-    state.sectionEditing = editing;
-    $("section-tool").setAttribute("aria-pressed", String(editing));
-    $("map").classList.toggle("section-editing", editing);
-    updateSectionControls();
+    if (editing && !windows.current("section")) windows.create("section");
+    windows.each("section", w=>{w.data.sectionEditing=false;});
+    state.sectionEditing=editing;
+    $("section-tool").setAttribute("aria-pressed",String(editing));
+    $("map").classList.toggle("section-editing",editing);$("projected-map").classList.toggle("section-editing",editing);
+    if(windows.current("section"))updateSectionControls();
   }
   function closeSectionPanel() {
-    $("section-panel").hidden = true;
-    setSectionEditing(false);
-    updatePanels();
+    const win=windows.current("section");if(win){setSectionEditing(false);windows.minimise(win);}updatePanels();
   }
   function updateSectionControls() {
     const count = state.waypoints.length;
@@ -944,6 +992,7 @@
     $("section-summary").textContent = route + help;
     $("section-content").hidden = count < 2;
     $("section-undo").disabled = $("section-clear").disabled = !count;
+    updateWindowMenus();
   }
   function clearSectionFrame() {
     state.section = null;
@@ -977,35 +1026,17 @@
     changeRoute([...points, next]);
   }
   function drawSectionRoute() {
-    const points = state.section?.path || state.waypoints;
-    if (!points.length) return;
-    const waypoints = state.section?.waypoints || state.waypoints.map((_, index) => index);
-    let previous = map.getCenter().lng;
-    const route = points.map(([lat, lon]) => {
-      previous = lon + 360 * Math.round((previous - lon) / 360);
-      return [lat, previous];
-    });
-    overlay.save();
-    overlay.lineJoin = "round";
-    overlay.lineCap = "round";
-    overlay.font = "bold 12px sans-serif";
-    overlay.textAlign = "center";
-    overlay.textBaseline = "middle";
-    for (const shift of [-360, 0, 360]) {
-      const path = route.map(([lat, lon]) => map.latLngToContainerPoint([lat, lon + shift]));
-      overlay.beginPath();
-      path.forEach(({x, y}, i) => i ? overlay.lineTo(x, y) : overlay.moveTo(x, y));
-      overlay.strokeStyle = "white"; overlay.lineWidth = 5; overlay.stroke();
-      overlay.strokeStyle = "#25524c"; overlay.lineWidth = 2.5; overlay.stroke();
-      waypoints.forEach((index, i) => {
-        const {x, y} = path[index];
-        overlay.beginPath(); overlay.arc(x, y, 9, 0, 2 * Math.PI);
-        overlay.fillStyle = "#25524c"; overlay.fill();
-        overlay.strokeStyle = "white"; overlay.lineWidth = 2; overlay.stroke();
-        overlay.fillStyle = "white"; overlay.fillText(String.fromCharCode(65 + i), x, y + .5);
-      });
-    }
-    overlay.restore();
+    const points=state.section?.path||state.waypoints;if(!points.length)return;
+    const win=windows.current("section"),waypoints=state.section?.waypoints||state.waypoints.map((_,i)=>i);
+    let previous=view.centre().lng;
+    const route=points.map(([lat,lon])=>{previous=lon+360*Math.round((previous-lon)/360);return [lat,previous];});
+    overlay.save();overlay.lineJoin="round";overlay.lineCap="round";overlay.font="bold 11px sans-serif";overlay.textAlign="center";overlay.textBaseline="middle";
+    overlay.beginPath();geoPath(route);overlay.strokeStyle="white";overlay.lineWidth=5;overlay.stroke();overlay.strokeStyle="#25524c";overlay.lineWidth=2.5;overlay.stroke();
+    for(const shift of (view.mode==="flat"?[-360,0,360]:[0]))waypoints.forEach((index,i)=>{
+      const p=view.project([route[index][0],route[index][1]+shift]);if(!p)return;const {x,y}=p;
+      overlay.beginPath();overlay.arc(x,y,10,0,2*Math.PI);overlay.fillStyle="#25524c";overlay.fill();overlay.strokeStyle="white";overlay.lineWidth=2;overlay.stroke();overlay.fillStyle="white";overlay.fillText(String.fromCharCode(65+i),x,y+.5);
+      if(i===0){overlay.fillStyle="#25524c";overlay.fillText("C"+win.id,x,y-17);}
+    });overlay.restore();
   }
   async function loadSection() {
     state.sectionAbort?.abort();
@@ -1015,11 +1046,11 @@
       $("section-status").textContent = "This record lacks the vertical coordinates needed for a cross-section.";
       return;
     }
-    const controller = new AbortController(), serial = state.serial;
+    const controller = new AbortController(), serial = state.serial, win=windows.current("section");
     state.sectionAbort = controller;
     $("section-status").textContent = "Reading cross-section…";
     const result = await chartResult("cross-section", request, controller.signal);
-    if (!controller.signal.aborted && serial === state.serial) showSectionFrame(result);
+    if (!controller.signal.aborted && serial === state.serial && !win.closed) windows.with("section",win,()=>showSectionFrame(result));
   }
   function showSectionFrame({data, error}) {
     if (error) {
@@ -1033,9 +1064,8 @@
     scheduleDraw();
   }
   function lockSectionAxes(plot) {
-    if (plot?.valid && state.playViews && state.playViews.section?.key !== plot.key) {
-      state.playViews.section = {key: plot.key, x: plot.fullX, y: plot.fullY, range: plot.range};
-    }
+    const win=windows.current("section");
+    if(plot?.valid&&state.playing&&win?.playView?.key!==plot.key)win.playView={key:plot.key,x:plot.x,y:plot.y,range:plot.range};
   }
   function renderSection() {
     const data = state.section;
@@ -1044,13 +1074,13 @@
     const unit = variable === "t" ? units(variable) : data.variable.units;
     const offset = convert(0, variable);
     const key = [data.axis, variable, unit].join("|");
-    const locked = state.playViews?.section?.key === key ? state.playViews.section : null;
+    const held=windows.current("section")?.playView, locked=held?.key===key?held:null;
     const plot = plots.crossSection(data, {
       canvas: $("section-raster"), colours: lut(variable), name,
       symmetric: ["u", "v"].includes(variable), convert: raw => raw + offset,
       view: state.sectionView?.axis === data.axis ? state.sectionView : locked, range: locked?.range
     });
-    plot.key = key;
+    plot.key = key; plot.svg=plot.svg.replaceAll("section-clip","section-clip-"+windows.current("section").id);
     state.sectionPlot = plot;
     lockSectionAxes(plot);
     $("section-axes").innerHTML = plot.svg;
@@ -1064,7 +1094,9 @@
     $("section-note").textContent = !plot.valid ? "No represented data along this route." :
       (dry ? "Dry-air height (q absent). " : "") +
       (data.axis === "pressure" ? "Brown line shows surface pressure." : "Brown line marks the ground.");
-    bindPlotZoom($("section-axes"), plot, $("section-zoom-axis"), setSectionView, resetSectionZoom);
+    const win=windows.current("section");
+    bindPlotZoom($("section-axes"),plot,$("section-zoom-axis"),(x,y)=>windows.with("section",win,()=>setSectionView(x,y)),()=>windows.with("section",win,resetSectionZoom));
+    syncBounds("section",plot);
   }
   function setSectionView(x, y) {
     if (x[1] - x[0] < 1e-8 || y[1] - y[0] < 1e-8) return;
@@ -1074,10 +1106,12 @@
   function resetSectionZoom() {
     stopPlay();
     state.sectionView = null;
+    $("section-bounds-status").textContent="";
     renderSection();
   }
   const TRACK_COLOURS=["#123e35","#ac3b34","#3c5599","#814892","#a66916","#247c87"];
-  function renderTracks() {
+  function renderTracks() {windows.each("point",renderPointTracks);}
+  function renderPointTracks() {
     const active=state.tracks.find(t=>t.id===state.activeTrack);state.drift=active?.result||null;
     $("track-list").replaceChildren(...state.tracks.map(t=>{
       const b=document.createElement("button");b.textContent="Track "+t.id+" · "+t.label;b.style.setProperty("--track-color",t.colour);b.classList.toggle("active",t.id===state.activeTrack);
@@ -1089,14 +1123,15 @@
   }
   async function runDrift() {
     if(!state.selected||!state.grid||state.tracing)return;
+    const win=windows.current("point");
     const serial=++state.driftSerial,request=args({lat:state.selected.lat,lon:state.selected.lon,hours:$("drift-hours").value}),layer=layerLabel(),datetime=current().datetime;
     state.tracing=true;$("drift-run").disabled=true;$("drift-status").textContent="Tracing through daily ERA5 files…";
     try {
       const result=await api("/api/drift",request);if(serial!==state.driftSerial)return;
       const id=++state.trackId,track={id,result,layer,colour:TRACK_COLOURS[(id-1)%TRACK_COLOURS.length],label:datetime.slice(0,16).replace("T"," ")+" UTC · "+result.hours+" h · "+layer};
       state.tracks.push(track);state.activeTrack=id;state.tracing=false;renderTracks();scheduleDraw();
-    } catch(error){if(serial===state.driftSerial)$("drift-status").textContent=error.message;}
-    finally{if(serial===state.driftSerial){state.tracing=false;$("drift-run").disabled=false;}}
+    } catch(error){if(serial===state.driftSerial&&!win.closed)windows.with("point",win,()=>{$("drift-status").textContent=error.message;});}
+    finally{if(serial===state.driftSerial){state.tracing=false;renderTracks();}}
   }
   function downloadText(name,text,type="text/csv;charset=utf-8") {
     const object=URL.createObjectURL(new Blob([text],{type})),a=document.createElement("a");
@@ -1110,31 +1145,169 @@
     el.textContent=format(convert(raw))+" "+units()+"\n"+coordinateLabel(ll.lat,ll.lng,2);
     el.hidden=false;el.style.left=Math.min(event.containerPoint.x+15,size.x-170)+"px";el.style.top=Math.min(event.containerPoint.y+15,size.y-135)+"px";
   }
-  map.on("move zoom resize",scheduleDraw);map.on("click", e => {
+  function projectionChanged() {
+    const projected=view.mode!=="flat";
+    state.projection=view.mode; $("hover-readout").hidden=true;
+    $("map").parentElement.classList.toggle("projected-mode",projected);
+    document.querySelectorAll("[data-projection]").forEach(b=>{
+      const active=b.dataset.projection===view.mode;b.classList.toggle("active",active);b.setAttribute("aria-pressed",String(active));
+    });
+    if(projected)map.removeLayer(basemap);
+    else if($("basemap-toggle").checked&&!map.hasLayer(basemap))basemap.addTo(map);
+    $("basemap-toggle").disabled=projected;
+    $("projection-note").hidden=!projected;
+    $("projection-note").textContent=view.mode==="globe"?"Drag to rotate · scroll to zoom · offline coastlines":"Polar stereographic · drag to pan · offline coastlines";
+    wind.reset();state.contourCache=null;scheduleDraw();
+  }
+  function updateMapScale() {
+    const size=map.getSize(),g=view.mode==="flat"?null:view.geometry();
+    let a=view.unproject([size.x-210,size.y-140]),b=view.unproject([size.x-110,size.y-140]);
+    if(!a||!b){a=view.unproject([g.x-50,g.y]);b=view.unproject([g.x+50,g.y]);}
+    if(!a||!b){$("map-scale").hidden=true;return;}
+    const rad=Math.PI/180,dp=(b.lat-a.lat)*rad,dl=(b.lng-a.lng)*rad;
+    const h=Math.sin(dp/2)**2+Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dl/2)**2;
+    const km=12742*Math.asin(Math.min(1,Math.sqrt(h)));
+    if(!Number.isFinite(km)||km<=0){$("map-scale").hidden=true;return;}
+    const magnitude=10**Math.floor(Math.log10(km)),nice=[5,2,1].map(v=>v*magnitude).find(v=>v<=km)||magnitude/2;
+    $("map-scale").hidden=false;$("map-scale-label").textContent=(view.mode==="flat"?"":"≈ ")+(nice>=1?plots.tickLabel(nice)+" km":plots.tickLabel(nice*1000)+" m");
+    $("map-scale-bar").style.width=Math.round(100*nice/km)+"px";
+    $("map-scale").title="Approximate ground distance at "+coordinateLabel(a.lat,a.lng,1);
+  }
+  function syncBounds(prefix,plot) {
+    const axis=prefix==="profile"?plot.axis:state.section.axis;
+    const pressure=axis==="pressure",model=axis==="model",unit=pressure?"hPa":model?"level":"km";
+    const physical=v=>pressure?10**(-v):model?-v:v;
+    $(prefix+"-bottom-label").textContent="Bottom ("+unit+")";$(prefix+"-top-label").textContent="Top ("+unit+")";
+    $(prefix+"-bottom").value=Number(physical(plot.y[0]).toPrecision(7));
+    $(prefix+"-top").value=Number(physical(plot.y[1]).toPrecision(7));
+    for(const side of ["bottom","top"]){const input=$(prefix+"-"+side);if(pressure||model)input.min=pressure?"0.000001":"1";else input.removeAttribute("min");}
+  }
+  function applyBounds(prefix) {
+    const plot=prefix==="profile"?state.profilePlot:state.sectionPlot;if(!plot)return;
+    const axis=prefix==="profile"?plot.axis:state.section.axis;
+    const bottom=Number($(prefix+"-bottom").value),top=Number($(prefix+"-top").value);
+    const reversed=axis==="pressure"||axis==="model";
+    const valid=[bottom,top].every(Number.isFinite)&&(!reversed||bottom>0&&top>0)&&(reversed?bottom>top:top>bottom);
+    const status=$(prefix+"-bounds-status");
+    if(!valid){status.textContent=reversed?"Use positive bounds with bottom greater than top (for example 300 and 100 hPa).":"Top must be greater than bottom.";return;}
+    status.textContent="";stopPlay();
+    const transform=v=>axis==="pressure"?-Math.log10(v):axis==="model"?-v:v;
+    const y=[transform(bottom),transform(top)];
+    if(prefix==="profile")setProfileView(plot.x,y);else setSectionView(plot.x,y);
+  }
+  function updateWindowMenus() {
+    if(!windows)return;
+    for(const kind of ["point","section"]){
+      $(kind+"-count").textContent=windows.items[kind].length;
+      $(kind+"-window-list").replaceChildren(...windows.items[kind].map(win=>{
+        const row=document.createElement("div");row.className="window-list-row";
+        const open=document.createElement("button"),title=document.createElement("span"),detail=document.createElement("small");
+        const selected=win.data.selected,points=win.data.waypoints;
+        title.textContent=kind==="point"?"P"+win.id+" · "+(selected?coordinateLabel(selected.lat,selected.lon,2):"Choose a point"):"C"+win.id+" · "+(points.length?points.length+" waypoints":"New cross-section");
+        detail.textContent=win.minimised?"Minimised · click to reopen":"Open · click to focus";
+        open.append(title,detail);open.onclick=()=>{
+          if(kind==="section")setSectionEditing(false);windows.focus(win);hideWindowMenus();updatePanels();
+        };
+        const close=document.createElement("button");close.className="icon-button";close.textContent="×";close.setAttribute("aria-label","Close "+(kind==="point"?"point P":"cross-section C")+win.id);close.onclick=()=>windows.close(win);
+        row.append(open,close);return row;
+      }));
+    }
+  }
+  function hideWindowMenus() {
+    for(const kind of ["point","section"]){$(kind+"-menu").hidden=true;$(kind+"-menu-toggle").setAttribute("aria-expanded","false");}
+  }
+  function toggleWindowMenu(kind) {
+    const menu=$(kind+"-menu"),open=menu.hidden;hideWindowMenus();if(!open)return;
+    menu.hidden=false;$(kind+"-menu-toggle").setAttribute("aria-expanded","true");
+    const anchor=$(kind+"-menu-toggle").getBoundingClientRect(),area=$("map").parentElement.getBoundingClientRect();
+    const width=Math.min(285,area.width-20);
+    Object.assign(menu.style,{position:"fixed",width:width+"px",left:Math.max(area.left+10,Math.min(anchor.right-width,area.right-width-10))+"px",top:(anchor.bottom+7)+"px"});
+  }
+  function bindWindow(win) {
+    const kind=win.kind;
+    const on=(id,event,fn)=>{$(id)[event]=e=>windows.with(kind,win,()=>fn(e));};
+    on(kind+"-minimise","onclick",()=>{if(kind==="section"&&win.data.sectionEditing)setSectionEditing(false);windows.minimise(win);updatePanels();});
+    on(kind+"-close","onclick",()=>windows.close(win));
+    if(kind==="point"){
+      win.panel.querySelector(".eyebrow").textContent="SELECTED LOCATION · P"+win.id;
+      const fields=current()?.fields||[];
+      for(const option of $("profile-variable").options)option.disabled=!fields.some(f=>f.id===option.value);
+      if($("profile-variable").selectedOptions[0]?.disabled)$("profile-variable").value=Array.from($("profile-variable").options).find(o=>!o.disabled)?.value||"t";
+      on("coordinate-toggle","onclick",()=>{state.compassCoordinates=!state.compassCoordinates;remember("compassCoordinates",state.compassCoordinates?"1":"0");windows.each("point",updateCoordinates);updateWindowMenus();});
+      for(const id of ["profile-variable","profile-axis"])on(id,"onchange",resetProfileZoom);
+      on("profile-reset","onclick",resetProfileZoom);
+      on("profile-bounds","onsubmit",e=>{e.preventDefault();applyBounds("profile");});
+      on("profile-png","onclick",exportProfilePNG);on("drift-run","onclick",runDrift);
+      on("drift-clear","onclick",()=>clearDrift());on("drift-clear-all","onclick",()=>clearDrift(true));
+      on("drift-export","onclick",()=>{
+        if(!state.drift)return;
+        downloadText("era5-wind-drift.csv","datetime_utc,latitude,longitude,elapsed_seconds,mode,level_value,height_reference\n"+
+          state.drift.path.map(p=>[p.datetime,p.latitude,p.longitude,p.elapsed_seconds,state.drift.mode,state.drift.value,state.drift.reference].join(",")).join("\n")+"\n");
+      });
+      renderPointTracks();
+    }else{
+      win.panel.querySelector("h2").textContent="Vertical cross-section · C"+win.id;
+      configureSectionAxis(current());
+      on("section-undo","onclick",()=>changeRoute(state.waypoints.slice(0,-1)));
+      on("section-clear","onclick",()=>changeRoute([]));
+      on("section-axis","onchange",()=>{state.sectionAxis=$("section-axis").value;changeRoute(state.waypoints);});
+      on("section-reset","onclick",resetSectionZoom);
+      on("section-bounds","onsubmit",e=>{e.preventDefault();applyBounds("section");});
+      updateSectionControls();
+    }
+  }
+  function initialiseWindows() {
+    const fields={point:["selected","profile","profileView","profilePlot","profileRequest","pointAbort"],
+      section:["waypoints","sectionEditing","section","sectionPlot","sectionView","sectionAxis","sectionAbort"]};
+    const defaults={};for(const kind of Object.keys(fields))defaults[kind]=Object.fromEntries(fields[kind].map(key=>[key,state[key]]));
+    windows=new window.ERA5Windows($("map").parentElement,defaults,bindWindow,()=>{updatePanels();scheduleDraw();},win=>{
+      if(win.kind==="point")state.pointAbort?.abort();else{state.sectionAbort?.abort();if(win.data.sectionEditing)setSectionEditing(false);}
+    });
+    Object.defineProperties(state,{pointWindows:{get:()=>windows.items.point},sectionWindows:{get:()=>windows.items.section}});
+    for(const kind of Object.keys(fields))for(const key of fields[kind])Object.defineProperty(state,key,{
+      get(){const win=windows.current(kind);return win?win.data[key]:defaults[kind][key];},
+      set(value){const win=windows.current(kind);(win?win.data:defaults[kind])[key]=value;},configurable:true
+    });
+    for(const kind of ["point","section"]){
+      $(kind+"-menu-toggle").onclick=()=>toggleWindowMenu(kind);
+    }
+    $("section-new").onclick=()=>{stopPlay();windows.create("section");setSectionEditing(true);hideWindowMenus();};
+    $("section-tool").onclick=()=>{
+      if(state.sectionEditing)setSectionEditing(false);
+      else {showSectionPanel();setSectionEditing(true);}hideWindowMenus();
+    };
+    $("point-open").onclick=()=>{if(windows.active.point)showPointPanel();else notice("Click the map to open a selected point profile.");hideWindowMenus();};
+    $("point-new").onclick=()=>{setSectionEditing(false);notice("Click the map to open another selected point profile.");hideWindowMenus();};
+    document.addEventListener("pointerdown",e=>{if(!e.target.closest(".plot-tool"))hideWindowMenus();});
+    document.addEventListener("keydown",e=>{if(e.key==="Escape")hideWindowMenus();});
+    document.querySelectorAll("[data-projection]").forEach(b=>b.onclick=()=>view.setMode(b.dataset.projection));
+    $("map-zoom-in").onclick=()=>view.zoom(1);$("map-zoom-out").onclick=()=>view.zoom(-1);
+  }
+  initialiseWindows();
+  map.on("move zoom resize",()=>{wind.reset();scheduleDraw();});map.on("click", e => {
     if (state.sectionEditing || e.originalEvent?.ctrlKey || e.originalEvent?.metaKey) addWaypoint(e.latlng);
     else selectPoint(e.latlng);
   });map.on("mousemove",hover);
   map.on("mouseout movestart zoomstart",()=>{$("hover-readout").hidden=true;});
   new ResizeObserver(()=>{map.invalidateSize();resize();}).observe($("map"));
   window.addEventListener("resize", () => {
-    if (narrowMap() && !$("point-panel").hidden && !$("section-panel").hidden) closeSectionPanel();
-    resize();
+    windows.clampAll(); resize();
   });
   $("variable").onchange=()=>{stopPlay();state.variable=$("variable").value;debounceSlice();};
   document.querySelectorAll("[data-field]").forEach(b=>b.onclick=()=>{if(!b.disabled){$("variable").value=b.dataset.field;$("variable").dispatchEvent(new Event("change"));}});
   document.querySelectorAll("[data-mode]").forEach(b=>b.onclick=()=>{if(!b.disabled)chooseMode(b.dataset.mode);});
   $("level").oninput = e => setLevel(e.target.value === "" ? NaN : +e.target.value);
   $("level-slider").oninput = e => setLevel(+e.target.value);
-  $("height-reference").onchange=()=>{stopPlay();state.reference=state.preferredReference=$("height-reference").value;remember("heightReference",state.reference);state.profileView=null;configureLayer();debounceSlice();};
+  $("height-reference").onchange=()=>{stopPlay();state.reference=state.preferredReference=$("height-reference").value;remember("heightReference",state.reference);windows.each("point",()=>{state.profileView=null;});configureLayer();debounceSlice();};
   $("temperature-unit").onchange=()=>{
     stopPlay();
-    state.profileView=null;
+    windows.each("point",()=>{state.profileView=null;});
     if(state.variable==="t") {
       if(state.grid&&$("range-mode").value!=="fixed")updateScale();
       else {const delta=$("temperature-unit").value==="C"?-273.15:273.15;state.scale=state.scale.map(v=>v+delta);}
       $("range-min").value=state.scale[0].toFixed(2);$("range-max").value=state.scale[1].toFixed(2);
     }
-    updateHead();updateLegend();scheduleDraw();renderMetrics();renderProfile();renderSection();
+    updateHead();updateLegend();scheduleDraw();windows.each("point",()=>{renderMetrics();renderProfile();});windows.each("section",renderSection);
   };
   $("date").onchange=()=>loadDay($("date").value);
   $("prev-day").onclick=()=>{const i=state.catalog&&state.catalog.dates.indexOf(state.date);if(i>0)loadDay(state.catalog.dates[i-1]);};
@@ -1145,12 +1318,13 @@
   $("prev-time").onclick=()=>changeTime(state.ti-1);$("next-time").onclick=()=>changeTime(state.ti+1);
   $("play").onclick=()=>{if(state.playing)stopPlay();else startPlay();};
   $("opacity").oninput=()=>{$("opacity-label").textContent=$("opacity").value+"%";scheduleDraw();};
-  $("wind-toggle").onchange=()=>{stopPlay();invalidate();loadSlice();};$("grid-toggle").onchange=scheduleDraw;
+  $("wind-toggle").onchange=()=>{stopPlay();invalidate();loadSlice();};
+  $("animated-wind").onchange=()=>{stopPlay();wind.update($("animated-wind").checked);if(state.grid?.arrays.u&&state.grid?.arrays.v)scheduleDraw();else {invalidate();loadSlice();}};$("grid-toggle").onchange=scheduleDraw;
   $("coastline-toggle").checked=stored("coastlines","0")==="1";
   const coastAttribution='<a href="https://www.naturalearthdata.com/" target="_blank" rel="noopener">Natural Earth</a>';
   function coastlineChanged(){remember("coastlines",$("coastline-toggle").checked?"1":"0");map.attributionControl[$("coastline-toggle").checked?"addAttribution":"removeAttribution"](coastAttribution);scheduleDraw();}
   $("coastline-toggle").onchange=coastlineChanged;if($("coastline-toggle").checked)coastlineChanged();
-  $("basemap-toggle").onchange=()=>{$("basemap-toggle").checked?basemap.addTo(map):map.removeLayer(basemap);};
+  $("basemap-toggle").onchange=()=>{$("basemap-toggle").checked&&view.mode==="flat"?basemap.addTo(map):map.removeLayer(basemap);};
   $("range-mode").onchange=()=>{updateScale();updateLegend();state.contourCache=null;scheduleDraw();};
   for(const id of ["range-min","range-max"])$(id).onchange=()=>{
     const lo=+$("range-min").value,hi=+$("range-max").value;
@@ -1160,32 +1334,9 @@
 
   $("fit-data").onclick=fitData;$("refresh").onclick=()=>connect(true);
   $("sidebar-toggle").onclick=()=>{$("sidebar").classList.toggle("open");setTimeout(()=>map.invalidateSize(),0);};
-  $("point-close").onclick=()=>{$("point-panel").hidden=true;updatePanels();};
-  $("point-open").onclick = showPointPanel;
-  $("section-tool").onclick = () => {
-    if (state.sectionEditing) setSectionEditing(false);
-    else { showSectionPanel(); setSectionEditing(true); }
-  };
-  $("section-close").onclick = closeSectionPanel;
-  $("section-undo").onclick = () => changeRoute(state.waypoints.slice(0, -1));
-  $("section-clear").onclick = () => changeRoute([]);
-  $("section-axis").onchange = () => {
-    state.sectionAxis = $("section-axis").value;
-    changeRoute(state.waypoints);
-  };
-  $("section-reset").onclick = resetSectionZoom;
-  $("coordinate-toggle").onclick=()=>{state.compassCoordinates=!state.compassCoordinates;remember("compassCoordinates",state.compassCoordinates?"1":"0");updateCoordinates();};
-  $("profile-variable").onchange = $("profile-axis").onchange = $("profile-reset").onclick = resetProfileZoom;
   $("notice-close").onclick=()=>{dismissedNotices.add($("notice-text").textContent);$("notice").hidden=true;};
   $("contour-toggle").onchange=scheduleDraw;
-  $("map-png").onclick=exportMapPNG;$("profile-png").onclick=exportProfilePNG;
-  $("drift-run").onclick=runDrift;$("drift-clear").onclick=()=>clearDrift();
-  $("drift-clear-all").onclick=()=>clearDrift(true);
-  $("drift-export").onclick=()=>{
-    if(!state.drift)return;
-    downloadText("era5-wind-drift.csv","datetime_utc,latitude,longitude,elapsed_seconds,mode,level_value,height_reference\n"+
-      state.drift.path.map(p=>[p.datetime,p.latitude,p.longitude,p.elapsed_seconds,state.drift.mode,state.drift.value,state.drift.reference].join(",")).join("\n")+"\n");
-  };
+  $("map-png").onclick=exportMapPNG;
   function shellQuote(text) {return "'"+String(text).replace(/'/g,"'\\''")+"'";}
   function readConfigEditor() {
     const data_root=$("config-root").value.trim(),host=$("config-host").value.trim();
@@ -1200,10 +1351,10 @@
     return {data_root,host,port,cache_mb};
   }
   function fillConfigEditor(settings,path) {
-    const defaults={data_root:"/data3/ERA5",host:"127.0.0.1",port:8768,cache_mb:256};
+    const defaults={data_root:"/data3/ERA5",host:"127.0.0.1",port:8769,cache_mb:256};
     const c=Object.assign(defaults,settings);
     $("config-root").value=c.data_root;$("config-host").value=c.host;
-    $("config-port").value=c.port||8768;$("config-cache").value=c.cache_mb;
+    $("config-port").value=c.port||8769;$("config-cache").value=c.cache_mb;
     $("config-path").value=path||stored("configPath","~/era5viewer.json");
     state.configDraft=c;updateConfigPreview();
   }
@@ -1280,10 +1431,10 @@
   function dispose() {
     stopPlay(); state.prefetchSerial++; state.cacheEpoch++; clearTimeout(changeTimer);
     state.serial++; state.daySerial++; state.connectSerial++; state.driftSerial++;
-    abortLoads();
+    abortLoads(); wind.dispose();
   }
   window.addEventListener("pagehide",dispose);
   // Exposed to make scientific sampling and asynchronous UI behaviour testable.
-  window.era5viewer={state,map,connect,loadSlice,sample,selectPoint,changeTime,dispose,captureMap,captureProfile,setProfileView,getFrame,coordinateLabel,readConfigEditor};
+  window.era5viewer={state,map,view,wind,windows,connect,loadSlice,sample,selectPoint,changeTime,dispose,captureMap,captureProfile,setProfileView,getFrame,coordinateLabel,readConfigEditor,setProjection:mode=>view.setMode(mode)};
   updateCoordinates();updateReaderConfiguration();resize();configureLayer();updateHead();connect();
 })();

@@ -135,3 +135,31 @@ from the interpolated wind components. The brown line shows surface pressure,
 surface geopotential height (MSL), or zero height above ground (AGL). Samples
 below the surface, outside represented levels, or across missing levels are
 left blank. Sea-level height requires matching surface geopotential.
+
+
+## Display projections and animated wind (v1.4)
+
+Polar and globe views use spherical display geometry, not ellipsoidal EPSG
+3413/3031 coordinates. They sample the same geographic ERA5 grid by inverse
+projection at screen pixels, using the existing missing-aware bilinear
+interpolator. The spherical radius is 6371 km for the approximate scale ruler.
+The two polar maps use stereographic geometry centred on ±90°; a central
+meridian of 0° and a dimensionless projected radius of
+`2 tan(pi/4 − sign*latitude/2)`. Globe mode uses orthographic geometry about
+the current rotation and omits the far hemisphere. These are display
+projections, not exported coordinate reference systems; Layer netCDF retains
+the original geographic grid.
+
+Wind vectors are projected from an east/north tangent basis on the sphere,
+including the changing orientation around a pole. Small projected
+displacements retain subpixel precision. The animated particles are
+screen-space streamlets that resample current U/V at each step. Their speed
+is accelerated and capped for visual clarity, and is not a physical elapsed
+time or forecast. Particles are reseeded at missing data, the screen edge,
+and the globe horizon. They never create a wind value across a missing
+interpolation corner. Time-dependent trajectories still use the reader's
+separate drift integration.
+
+Projection references: [PROJ stereographic](https://proj.org/en/stable/operations/projections/stere.html)
+and [PROJ orthographic](https://proj.org/en/stable/operations/projections/ortho.html).
+The implementation is bundled, with no projection network service.

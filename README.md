@@ -1,4 +1,4 @@
-# era5viewer v1.3
+# era5viewer v1.4
 
 A local ERA5 viewer combining the map controls from
 SkySightStyleAtmosphereViewer with point inspection, local map assets and the
@@ -23,7 +23,7 @@ Python 3.10 or newer, Python's venv support and internet access for that initial
 installation. Later runs use that environment. The project directory can be
 read-only; each user owns their installation. Stop with Ctrl+C.
 
-Open **http://127.0.0.1:8768/** in your browser.
+Open **http://127.0.0.1:8769/** in your browser.
 
 If you already use an activated Conda environment, you can run directly:
 
@@ -45,7 +45,7 @@ On a shared server, a user-owned Conda environment is another option:
     bash /data1/tim/era5viewer/start.sh --config "$HOME/my-era5.json"
 
 You can also double-click index.html while the reader is running. Its connection
-dialog defaults to http://127.0.0.1:8768. Browsers that restrict local-file
+dialog defaults to http://127.0.0.1:8769. Browsers that restrict local-file
 network requests can use the localhost URL above.
 
 ## Your data
@@ -55,7 +55,7 @@ config.json starts with:
     {
       "data_root": "/data3/ERA5",
       "host": "127.0.0.1",
-      "port": 8768,
+      "port": 8769,
       "cache_mb": 256
     }
 
@@ -83,7 +83,7 @@ pressure views are derived from that format.
 Leave the shared `config.json` as the administrator's default. Use a personal
 file as described below, or override settings for your own reader:
 
-    bash start.sh --data-root /other/ERA5 --port 8768 --cache-mb 512
+    bash start.sh --data-root /other/ERA5 --port 8769 --cache-mb 512
 
 After adding data files, click the rescan button in the header. Restart your
 reader after changing your personal configuration or updating the viewer.
@@ -129,6 +129,56 @@ The configuration editor prepares files and commands; it does not change a
 running reader. Start or restart your personal reader with the selected file,
 then connect to it. No project-directory write permission is needed to run it.
 
+## New in v1.4
+
+The default reader port is **8769**. Start with `bash start.sh`, then open
+**http://127.0.0.1:8769/**. Existing personal configuration files keep their
+chosen port; change that file if you want to use the new default.
+
+The map toolbar now holds **Map**, **North polar**, **South polar**,
+**3D Globe**, exports, and the plot menus. The polar views use spherical polar
+stereographic projections; the rotatable globe uses a spherical orthographic
+projection with horizon clipping. Drag to pan a polar map or rotate the globe,
+scroll to zoom, and use **Fit data** to reset the view. The globe/polar canvas
+also supports arrow keys and +/− when focused. Coastlines are bundled and drawn
+automatically in these views. Street tiles are available in Map mode; the
+checkbox preference is restored when returning to it. Fields, contours, wind
+vectors, points, routes and drift tracks all use the displayed projection.
+Map PNG exports that projection, including visible animated wind trails.
+The rounded scale is approximate at the location given in its tooltip; scale
+varies across a projected view, particularly near a globe's limb.
+
+Enable **Animated wind** beside Wind arrows under Map display for moving white
+streamlets. They use the current layer's U/V field, turn with the projection,
+and stop at missing data and the globe horizon. The toggle replaces the arrows
+while enabled, and works even if Wind arrows is unchecked. Animation speed is
+scaled for visibility: it shows the current wind pattern, not a forecast or
+an elapsed-time parcel path. Use **Trace the wind** for time-dependent drift.
+Wind animation is independent of the time playback button and pauses when the
+page is hidden. Turn off Animated wind to stop it.
+
+Click the map for a new point window. Use the **Cross-section** tool to draw a
+route, or **＋ New cross-section** in its arrow menu to start an independent
+one. Each window has its own axes, zoom, bounds, route/location and controls.
+Drag its heading to move it; stretch the top or bottom edge vertically, or the
+bottom-right grip in both directions. Focus a heading and use arrow keys to
+move it; focus a resize handle and use arrow keys to resize it. The **−** button
+minimises it to the corresponding toolbar menu. Reopen it there with the saved
+size, position, scroll and zoom. **×** removes that window and its map marker
+or route. The scrollable menus support multiple point and cross-section
+windows. Window state lasts for the current browser tab; reload starts fresh.
+
+The **Bottom** and **Top** inputs set the primary vertical axis exactly.
+Select Pressure, enter **300** and **100**, and choose **Apply Y** for a
+300–100 hPa view; use **1000** and **850** for 1000–850 hPa. hPa and mb are
+numerically equivalent. Pressure uses a log axis with pressure decreasing
+upward. Height inputs use km; model-level inputs use level numbers. These
+bounds retain horizontal zoom, and Reset zoom restores both full axes.
+Bounds may extend beyond represented data; missing values stay blank.
+All retained plots, including minimised ones, follow the map's time and layer.
+During playback, every retained plot is loaded before the new timestamp is
+shown; each plot retains its own view and colour range during playback.
+
 ## Use the viewer
 
 - **Field:** T, U, V and derived wind speed. Temperature displays °C or K.
@@ -168,8 +218,8 @@ then connect to it. No project-directory write permission is needed to run it.
   the cumulative-distance axis, in kilometres. Choose log-pressure, height
   above sea level (MSL) or height above ground (AGL), depending on your data.
   The brown line marks the surface. The field follows the map's variable,
-  and the chart supports drag and scroll zoom. On small screens, use the
-  **Cross-section** and **Selected point** buttons to switch panels.
+  and the chart supports drag and scroll zoom. Use the arrow menus beside
+  **Cross-section** and **Selected point** to manage multiple plot windows.
 - **Map:** pan/zoom, fit the data, toggle wind arrows/graticules, change opacity
   and toggle labelled contours of the displayed field. The grid badge reports
   measured longitude/latitude spacing rather than assuming 0.25 degrees.
@@ -296,12 +346,12 @@ graticules, coastlines, wind arrows, profiles and exports continue to work.
 
 Run the reader on the data machine. From your desktop:
 
-    ssh -N -L 8768:127.0.0.1:8768 user@data-machine
+    ssh -N -L 8769:127.0.0.1:8769 user@data-machine
 
-Open http://127.0.0.1:8768/ on your desktop. The SSH tunnel reaches the remote
+Open http://127.0.0.1:8769/ on your desktop. The SSH tunnel reaches the remote
 reader while keeping its default loopback binding. Run the SSH command in
 a terminal on your desktop and leave it open; the reader address stays
-http://127.0.0.1:8768. The SSH command is not a reader address.
+http://127.0.0.1:8769. The SSH command is not a reader address.
 
 ## Troubleshooting
 
@@ -344,6 +394,7 @@ Optional browser checks need Node only for testing:
 The DOM/canvas integration check can also run without a browser binary:
 
     npm run test:frontend
+    npm run test:projections
 
 scripts/make_test_data.py generates explicitly **synthetic** packed test data,
 using the packing parameters from your header. The viewer never selects those

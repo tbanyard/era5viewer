@@ -1,5 +1,35 @@
 # Verification
 
+## v1.4 checks
+
+- 43 Python tests and 7 subtests passed against synthetic NetCDF fixtures.
+  The reader/API reports 1.4.0, and a live reader was started on default port
+  8769. No real ERA5 archive was available for this release check.
+- 18,237 forward/inverse projection samples passed for the two polar views
+  and orthographic globe, including arbitrary globe rotations. Pole, horizon
+  and rotated east/north wind-basis checks passed.
+- DOM and native canvas integration checks exercised independent point and
+  section windows; manual 300–100 and 1000–850 hPa ranges; invalid bounds;
+  pointer drag; vertical edge resize; minimise/reopen with position, size,
+  scroll and zoom retained; unique control IDs; and close/removal.
+- Open and minimised plots were checked across time changes and synchronized
+  playback. A delayed cross-section response retained the current frame,
+  and pausing prevented a late response from advancing the display.
+- North/south/globe field pixels and PNG exports rendered using the running
+  reader. Generated renders were visually inspected. Globe rotation and
+  geographic click selection passed; pixels outside its limb stayed blank.
+- Animated wind moved independently of Wind arrows and time playback,
+  generated visible trails, and generated no particles when U was missing.
+  Turning it off cancelled its animation loop.
+- The existing CSV/NetCDF/PNG exports, coordinate preferences, configuration
+  editor, drift tracks, contours, plot zoom and cache checks passed.
+- A full Chromium session could not start in this execution environment
+  (the process exited with SIGTRAP). The expanded Playwright runner is
+  included, but real-browser desktop/mobile CSS, pointer interaction and
+  performance checks remain pending. DOM tests do not validate CSS layout.
+
+## Earlier release verification
+
 ## v1.3 checks
 
 - 43 Python tests passed against synthetic NetCDF files, including both the

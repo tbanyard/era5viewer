@@ -11,12 +11,15 @@
   <script src="web/vendor/leaflet/leaflet.js" defer></script>
   <script src="web/coastlines.js" defer></script>
   <script src="web/plots.js" defer></script>
+  <script src="web/projections.js" defer></script>
+  <script src="web/wind.js" defer></script>
+  <script src="web/windows.js" defer></script>
   <script src="web/app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
     <button id="sidebar-toggle" class="icon-button mobile-only" title="Show controls" aria-label="Show controls">☰</button>
-    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">E<span>5</span></span><span>era5<strong>viewer</strong> <span id="app-version" class="app-version">v1.3</span><small>YOUR ATMOSPHERE, EXPLORED</small></span></a>
+    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">E<span>5</span></span><span>era5<strong>viewer</strong> <span id="app-version" class="app-version">v1.4</span><small>YOUR ATMOSPHERE, EXPLORED</small></span></a>
     <div class="header-divider"></div>
     <div class="date-nav"><button id="prev-day" class="icon-button" title="Previous available day" aria-label="Previous available day">‹</button><label class="sr-only" for="date">Date in UTC</label><input id="date" type="date"><button id="next-day" class="icon-button" title="Next available day" aria-label="Next available day">›</button></div>
     <span id="time-label" class="time-label">— UTC</span>
@@ -45,7 +48,7 @@
         </section>
         <section class="group">
           <div class="section-heading"><h2>Map display</h2><button id="fit-data" class="text-button">Fit data ↗</button></div>
-          <label class="check"><input id="wind-toggle" type="checkbox" checked><span>Wind arrows</span><small>U + V</small></label>
+          <div class="wind-options"><label class="check"><input id="wind-toggle" type="checkbox" checked><span>Wind arrows</span></label><label class="animation-switch"><input id="animated-wind" type="checkbox" role="switch"><span>Animated wind</span></label></div>
           <label class="check"><input id="grid-toggle" type="checkbox" checked><span>Latitude / longitude grid</span></label>
           <label class="check"><input id="coastline-toggle" type="checkbox"><span>Coastlines</span><small>offline</small></label>
           <label class="check"><input id="basemap-toggle" type="checkbox" checked><span>Street basemap</span><small>online</small></label>
@@ -63,27 +66,40 @@
       <footer class="sidebar-foot"><span id="source-path">Waiting for the local data reader.</span><span id="file-info"></span></footer>
     </aside>
     <section class="map-area" aria-label="Atmospheric field map">
-      <div id="map"></div><canvas id="field-canvas" aria-hidden="true"></canvas><canvas id="overlay-canvas" aria-hidden="true"></canvas>
-      <div class="map-heading"><div><span class="eyebrow">ATMOSPHERIC EXPLORER</span><h2 id="map-field">Temperature</h2><p id="map-context">Connect to your local ERA5 archive</p></div><div class="map-actions"><span id="data-badge" class="map-badge">NETCDF · LOCAL</span><div class="map-export-buttons"><button id="map-png" class="button secondary" disabled title="Export this view, colourbar and labels; exclude the profile">↓ Map PNG</button><a id="layer-netcdf" class="button secondary disabled" href="#" download title="Download this time and layer on the full source grid, with lnsp and available surface z">↓ Layer netCDF</a></div><button id="section-tool" class="button secondary" type="button" aria-pressed="false" title="Add waypoints by clicking the map, or use Ctrl-click">Cross-section</button></div></div>
+      <div id="map"></div><div id="projected-map" hidden tabindex="0" role="application" aria-label="Projected map. Drag to pan or rotate; scroll or use plus and minus to zoom; arrow keys to move."></div><canvas id="field-canvas" aria-hidden="true"></canvas><canvas id="wind-canvas" aria-hidden="true" hidden></canvas><canvas id="overlay-canvas" aria-hidden="true"></canvas>
+      <nav class="map-toolbar" aria-label="Map and plot tools">
+        <div class="projection-buttons" role="group" aria-label="Map projection">
+          <button data-projection="flat" class="active" aria-pressed="true" title="Street map in Web Mercator">Map</button><button data-projection="north" aria-pressed="false" title="North polar stereographic">North polar</button><button data-projection="south" aria-pressed="false" title="South polar stereographic">South polar</button><button data-projection="globe" aria-pressed="false" title="Rotatable orthographic globe">3D Globe</button>
+        </div>
+        <div class="map-export-buttons"><button id="map-png" class="button secondary" disabled title="Export the displayed projection, colourbar and labels">↓ Map PNG</button><a id="layer-netcdf" class="button secondary disabled" href="#" download title="Download this time and layer on the full source grid">↓ Layer netCDF</a></div>
+        <div class="plot-tool"><div class="split-tool"><button id="section-tool" class="button secondary" type="button" aria-pressed="false" title="Click to draw a route; use the menu for more cross-sections">Cross-section <span id="section-count" class="window-count">0</span></button><button id="section-menu-toggle" class="menu-toggle" aria-label="Cross-section windows" aria-expanded="false" aria-controls="section-menu">⌄</button></div><div id="section-menu" class="plot-menu" hidden><button id="section-new" class="menu-new">＋ New cross-section</button><div id="section-window-list" class="window-list"></div></div></div>
+        <div class="plot-tool"><div class="split-tool"><button id="point-open" class="button secondary" type="button"><svg class="target-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="6"/><circle cx="10" cy="10" r="2"/><path d="M10 1v4m0 10v4M1 10h4m10 0h4"/></svg>Selected point <span id="point-count" class="window-count">0</span></button><button id="point-menu-toggle" class="menu-toggle" aria-label="Selected point windows" aria-expanded="false" aria-controls="point-menu">⌄</button></div><div id="point-menu" class="plot-menu" hidden><button id="point-new" class="menu-new">＋ Select a new point on the map</button><div id="point-window-list" class="window-list"></div></div></div>
+      </nav>
+      <div class="map-heading"><div><span class="eyebrow">ATMOSPHERIC EXPLORER</span><h2 id="map-field">Temperature</h2><p id="map-context">Connect to your local ERA5 archive</p><span id="data-badge" class="map-badge">NETCDF · LOCAL</span></div></div>
+      <div class="map-navigation"><div id="map-scale" class="map-scale" aria-label="Approximate map distance"><span id="map-scale-label"></span><i id="map-scale-bar"></i></div><div class="map-zoom"><button id="map-zoom-in" aria-label="Zoom in">+</button><button id="map-zoom-out" aria-label="Zoom out">−</button></div></div><div id="projection-note" class="projection-note" hidden></div>
       <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="notice-close" class="icon-button" aria-label="Dismiss message">×</button></div>
       <div id="loading" class="loading" hidden><span class="spinner"></span> Reading atmosphere…</div>
       <div id="empty-state" class="empty-state"><div class="empty-icon">⌁</div><h2>Your archive, on the map.</h2><p id="empty-message">Connecting to the ERA5 reader…</p><button id="empty-connect" class="button" hidden>Connection settings</button></div>
       <div id="hover-readout" class="hover-readout" hidden></div>
       <div id="colour-legend" class="colour-legend" hidden><div class="legend-heading"><strong id="legend-title">Temperature</strong><span id="legend-unit">°C</span></div><div id="legend-gradient" class="legend-gradient"></div><div class="legend-ticks"><span id="legend-low">—</span><span id="legend-mid">—</span><span id="legend-high">—</span></div><p id="legend-coverage">Transparent areas have no represented data.</p></div>
-      <button id="point-open" class="point-open button secondary" hidden>⌖ Selected point</button>
       <aside id="point-panel" class="point-panel" hidden aria-label="Selected location profile">
-        <div class="point-heading"><div><span class="eyebrow">SELECTED LOCATION</span><div class="coordinate-row"><h2 id="point-coordinates">—</h2><button id="coordinate-toggle" class="coordinate-toggle" type="button" aria-pressed="false" title="Use compass directions" aria-label="Use compass directions">NSEW</button></div></div><button id="point-close" class="icon-button" aria-label="Close point panel">×</button></div>
+        <div class="point-heading"><div><span class="eyebrow">SELECTED LOCATION</span><div class="coordinate-row"><h2 id="point-coordinates">—</h2><button id="coordinate-toggle" class="coordinate-toggle" type="button" aria-pressed="false" title="Use compass directions" aria-label="Use compass directions">NSEW</button></div></div><div class="window-buttons"><button id="point-minimise" class="icon-button" title="Minimise to Selected point" aria-label="Minimise point window">−</button><button id="point-close" class="icon-button" title="Close and remove this point" aria-label="Close point panel">×</button></div></div>
+        <div class="plot-scroll">
         <p id="point-context" class="point-context"></p><div id="point-status" class="note" role="status"></div>
         <div id="point-metrics" class="point-metrics"></div>
         <div class="profile-heading"><h3>Vertical profile</h3><label class="sr-only" for="profile-variable">Profile variable</label><select id="profile-variable"><option value="t">Temperature</option><option value="wind_speed">Wind speed</option><option value="u">U wind</option><option value="v">V wind</option></select></div>
         <div class="profile-toolbar"><label for="profile-axis">Primary y-axis<select id="profile-axis"><option value="height">Height</option><option value="pressure">Pressure</option><option value="model">Model level</option></select></label><label for="profile-zoom-axis">Zoom<select id="profile-zoom-axis"><option value="both">Both axes</option><option value="vertical">Y-axis</option><option value="horizontal">X-axis</option></select></label><button id="profile-reset" class="text-button">Reset zoom</button></div>
+        <form id="profile-bounds" class="axis-bounds"><label><span id="profile-bottom-label">Bottom (km)</span><input id="profile-bottom" type="number" step="any" required></label><label><span id="profile-top-label">Top (km)</span><input id="profile-top" type="number" step="any" required></label><button class="button secondary" type="submit">Apply Y</button><p id="profile-bounds-status" class="bounds-status" role="status"></p></form>
         <div id="profile-chart" class="profile-chart"></div>
         <p class="note profile-help">Drag a rectangle to zoom; scroll over the plot to zoom around the pointer.</p>
         <p id="profile-note" class="note"></p><div class="export-row"><a id="profile-export" class="text-button disabled" href="#" download="era5-profile.csv">↓ Profile CSV</a><button id="profile-png" class="text-button" disabled>↓ Profile PNG</button></div>
         <details class="drift-tools"><summary>Trace the wind <span>↗</span></summary><p class="note">Horizontal drift on the selected layer. Daily files are followed automatically, up to 10 days. Tracks stay until cleared.</p><div class="drift-form"><label for="drift-hours">Duration (hours)<input id="drift-hours" type="number" min="0.05" max="240" step="0.25" value="1"></label><button id="drift-run" class="button">Trace drift</button></div><p id="drift-status" class="note" role="status"></p><div id="track-list" class="track-list"></div><div class="export-row"><button id="drift-export" class="text-button" hidden>↓ Selected track CSV</button><button id="drift-clear" class="text-button" hidden>Clear selected</button><button id="drift-clear-all" class="text-button" hidden>Clear all tracks</button></div></details>
-      </aside>
+      
+        </div>
+</aside>
       <aside id="section-panel" class="section-panel" aria-label="Cross-section" hidden>
-        <div class="point-heading"><div><span class="eyebrow">TRANSECT</span><h2>Vertical cross-section</h2></div><button id="section-close" class="icon-button" aria-label="Close cross-section panel">×</button></div>
+        <div class="point-heading"><div><span class="eyebrow">TRANSECT</span><h2>Vertical cross-section</h2></div><div class="window-buttons"><button id="section-minimise" class="icon-button" title="Minimise to Cross-section" aria-label="Minimise cross-section window">−</button><button id="section-close" class="icon-button" title="Close and remove this cross-section" aria-label="Close cross-section panel">×</button></div></div>
+        <div class="plot-scroll">
         <div class="section-actions"><p id="section-summary" class="note"></p><button id="section-undo" class="text-button" type="button">Undo point</button><button id="section-clear" class="text-button" type="button">Clear route</button></div>
         <div id="section-status" class="note" role="status"></div>
         <div id="section-content" hidden>
@@ -92,12 +108,15 @@
             <label for="section-zoom-axis">Zoom<select id="section-zoom-axis"><option value="both">Both axes</option><option value="vertical">Y-axis</option><option value="horizontal">X-axis</option></select></label>
             <button id="section-reset" class="text-button" type="button">Reset zoom</button>
           </div>
+        <form id="section-bounds" class="axis-bounds"><label><span id="section-bottom-label">Bottom (km)</span><input id="section-bottom" type="number" step="any" required></label><label><span id="section-top-label">Top (km)</span><input id="section-top" type="number" step="any" required></label><button class="button secondary" type="submit">Apply Y</button><p id="section-bounds-status" class="bounds-status" role="status"></p></form>
           <p id="section-context" class="point-context"></p>
           <div id="section-chart" class="section-chart"><canvas id="section-raster" width="540" height="286" aria-hidden="true"></canvas><div id="section-axes"></div></div>
           <div id="section-legend" class="section-legend" hidden><span id="section-low"></span><span id="section-gradient"></span><span id="section-high"></span></div>
           <p id="section-note" class="note"></p>
         </div>
-      </aside>
+      
+        </div>
+</aside>
       <footer class="timeline"><div class="timeline-controls"><button id="prev-time" class="icon-button" title="Previous available time" aria-label="Previous available time">‹</button><button id="play" class="play-button" title="Play available times" aria-label="Play available times" disabled>▶</button><button id="next-time" class="icon-button" title="Next available time" aria-label="Next available time">›</button></div><div class="timeline-track"><label class="sr-only" for="time-slider">Available time in UTC</label><input id="time-slider" type="range" min="0" max="0" value="0" step="1" disabled><div id="time-ticks" class="time-ticks"></div></div><div class="timeline-count"><span id="time-count">— times</span><span id="animation-status" role="status"></span></div></footer>
     </section>
   </main>
@@ -105,13 +124,13 @@
     <div class="dialog-heading"><h2>Connect to your ERA5 archive</h2><button id="connection-close" class="icon-button" aria-label="Close connection settings">×</button></div>
     <p>Run a reader under your own account on the machine containing your data. Each user can choose their own configuration and port.</p>
     <p id="active-config" class="active-config">The reader's configuration will appear here when connected.</p>
-    <form id="connection-form"><label for="api-url">Reader address<input id="api-url" type="url" value="http://127.0.0.1:8768" required></label><button class="button" type="submit">Connect</button></form>
+    <form id="connection-form"><label for="api-url">Reader address<input id="api-url" type="url" value="http://127.0.0.1:8769" required></label><button class="button" type="submit">Connect</button></form>
     <details id="personal-config" class="personal-config"><summary>Personal configuration <span>Create or load your own JSON file</span></summary>
       <p>The shared <code>config.json</code> stays unchanged. Edit these settings, download a personal JSON file, then place it at the chosen path on the data machine. “Load JSON” imports a file into this editor.</p>
       <div class="config-grid">
         <label class="config-wide" for="config-path">Personal configuration path on the data machine<input id="config-path" type="text" value="~/era5viewer.json" spellcheck="false"></label>
         <label class="config-wide" for="config-root">ERA5 data directory on the data machine<input id="config-root" type="text" value="/data3/ERA5" spellcheck="false"></label>
-        <label for="config-port">Your reader port<input id="config-port" type="number" min="1024" max="65535" step="1" value="8768"></label>
+        <label for="config-port">Your reader port<input id="config-port" type="number" min="1024" max="65535" step="1" value="8769"></label>
         <label for="config-cache">Reader cache (MiB)<input id="config-cache" type="number" min="16" max="1048576" step="1" value="256"></label>
         <label class="config-wide" for="config-host">Reader bind address<input id="config-host" type="text" value="127.0.0.1" spellcheck="false"></label>
       </div>
@@ -121,8 +140,8 @@
       <details class="config-preview"><summary>JSON preview</summary><pre><code id="config-json"></code></pre></details>
     </details>
     <div class="reader-instructions"><h3>On the data machine</h3><pre><code id="config-command">bash /data1/tim/era5viewer/start.sh</code></pre><button id="config-command-copy" class="text-button" type="button">Copy command</button>
-      <h3>On your computer, for a remote data machine</h3><pre><code id="config-tunnel">ssh -N -L 8768:127.0.0.1:8768 user@data-machine</code></pre><button id="config-tunnel-copy" class="text-button" type="button">Copy tunnel command</button>
-      <p class="note">Run the SSH command in a terminal and leave it open. After starting this personal reader, connect to <strong id="config-address">http://127.0.0.1:8768</strong> using the address box above. Loading or downloading JSON prepares settings; it does not reconfigure a running reader.</p>
+      <h3>On your computer, for a remote data machine</h3><pre><code id="config-tunnel">ssh -N -L 8769:127.0.0.1:8769 user@data-machine</code></pre><button id="config-tunnel-copy" class="text-button" type="button">Copy tunnel command</button>
+      <p class="note">Run the SSH command in a terminal and leave it open. After starting this personal reader, connect to <strong id="config-address">http://127.0.0.1:8769</strong> using the address box above. Loading or downloading JSON prepares settings; it does not reconfigure a running reader.</p>
     </div>
   </dialog>
 </body>

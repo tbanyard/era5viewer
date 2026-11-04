@@ -109,7 +109,7 @@ class ApiTests(unittest.TestCase):
         status,headers,body=self.get("/api/config")
         self.assertEqual(status,200)
         info=json.loads(body)
-        self.assertEqual(info["version"],"1.3.0")
+        self.assertEqual(info["version"],"1.4.0")
         self.assertEqual(info["settings"]["data_root"],str(self.archive.root))
         self.assertEqual(info["settings"]["port"],self.server.server_port)
         self.assertEqual(info["settings"]["cache_mb"],16)

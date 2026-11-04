@@ -1,5 +1,19 @@
 # Release notes
 
+## v1.4 (1.4.0)
+
+- North/south polar stereographic views and a rotatable orthographic globe,
+  with projection-aware fields, contours, wind, coastlines, routes and exports.
+- Animated wind streamlets from the displayed layer, with missing-data and
+  horizon clipping, independent of time playback.
+- Multiple independent draggable/resizable point and cross-section windows;
+  minimise/reopen menus preserve layout, scroll and plot zoom.
+- Manual vertical bounds in hPa, km or model levels; all retained plots follow
+  synchronized time playback.
+- A top map toolbar, square SVG target icon, rounded graticule labels, a
+  rounded distance scale, and inset green scrollbars.
+- Default reader port 8769; application and API version 1.4.0.
+
 ## v1.3 (1.3.0)
 
 - Map waypoints via the Cross-section tool or Ctrl-click. Follow multiple
